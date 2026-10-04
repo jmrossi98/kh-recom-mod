@@ -26,7 +26,16 @@ constexpr uintptr_t kInSwitchRow = 0x1F8303;  // main row <-> enemy/friend row
 constexpr uintptr_t kInJumpFirst = 0x1F8359;  // shortcut to the first marked card
 constexpr uintptr_t kInJumpLast  = 0x1F837B;  // shortcut to the second marked card
 constexpr uintptr_t kInScroll    = 0x1F850C;  // rotate the deck one card
+constexpr uintptr_t kGetFlags    = 0x1B08C0;  // uint (int group, int id)
+constexpr uintptr_t kSetFlags    = 0x1B16C0;  // void (int group, int id, uint value)
+constexpr uintptr_t kPlayGate    = 0x16CF3E;  // mov eax,2: the bit that blocks the player's plays
 }
+
+// Flag word the card code checks all over the place. Bit 2 hides the player's
+// card HUD and normally also stops the player playing cards (cutscenes use it).
+constexpr int kFlagGroup = 1;
+constexpr int kFlagCards = 0xE2;
+constexpr uint32_t kFlagHidePlayerCards = 2;
 
 constexpr uint32_t kObjBattle = 0x16;
 
@@ -87,6 +96,22 @@ const char* card_name(uint8_t id) {
     return "???";
 }
 
+// MP cost per spell. Cure takes whatever is left, as in KH2.
+constexpr float kCostAll = -1.0f;
+
+float spell_cost(uint8_t id) {
+    switch (id) {
+        case 26: return 12;        // Fire
+        case 27: return 15;        // Blizzard
+        case 28: return 18;        // Thunder
+        case 29: return kCostAll;  // Cure
+        case 30: return 20;        // Gravity
+        case 31: return 25;        // Stop
+        case 32: return 15;        // Aero
+        default: return 0;
+    }
+}
+
 // The command menu. Up and down move the cursor here; confirm is left to the
 // game, and the play-card hook decides what the press means from this state.
 enum Command { kCmdAttack, kCmdMagic, kCmdItems, kCmdSummon, kCmdCount };
@@ -104,9 +129,21 @@ using SetPlayCardFn = uint64_t (*)(void* battle, uint32_t handle, int32_t side, 
                                    const CardData* data, int32_t flag);
 using ReloadDoneFn  = void (*)(void* deck, int32_t mode);
 using SideUpdateFn  = void (*)(void* battle, int32_t side);
+using GetFlagsFn    = uint32_t (*)(int32_t group, int32_t id);
+using SetFlagsFn    = void (*)(int32_t group, int32_t id, uint32_t value);
 
 static uintptr_t g_base = 0;
 static Menu g_menu;
+
+// MP. Re:CoM has none, so it lives here. Spells cost MP; when it runs out the
+// gauge refills on its own and magic is locked until it is full again.
+constexpr float kMpMax = 100.0f;
+constexpr float kMpChargeSeconds = 20.0f;
+static float g_mp = kMpMax;
+static bool g_mpCharging = false;
+static ULONGLONG g_lastTick = 0;
+static bool g_hideCards = true;
+static bool g_hideKeyDown = false;
 static WORD g_padPrev = 0;
 static bool g_keyPrev[4] = {};
 static FILE* g_log = nullptr;
@@ -259,8 +296,21 @@ static uint64_t play_card_hook(void* battle, uint32_t handle, int32_t side, void
         if (g_menu.subCount == 0) return 0;
         copy = g_menu.subCards[g_menu.subSel];
     }
+
+    float cost = (copy.type >> 4) == kTypeMagic ? spell_cost(copy.id) : 0;
+    if (cost != 0) {
+        if (g_mpCharging || g_mp <= 0 || (cost > 0 && g_mp < cost)) return 0;   // not enough MP
+    }
+
     uint64_t r = real(battle, handle, side, nullptr, &copy, flag);
     logf("play %02X value %d -> %llu", copy.id, copy.value, r);
+    if (r && cost != 0) {
+        g_mp = cost == kCostAll ? 0 : g_mp - cost;
+        if (g_mp <= 0) {
+            g_mp = 0;
+            g_mpCharging = true;
+        }
+    }
     if (r && g_menu.sub) close_submenu();
     return 0;
 }
@@ -375,6 +425,15 @@ static void install_hooks() {
     d &= nop_call("jump last", rva::kInJumpLast, jump_last);
     d &= nop_call("scroll", rva::kInScroll, scroll);
     logf(d ? "deck input off" : "deck input only partly off");
+
+    // The play routine refuses the player while the hide-cards flag is up.
+    // Zero the bit it tests for the player's side so the HUD can be hidden
+    // and confirm still gets through.  mov eax,2 -> mov eax,0
+    uint8_t* gate = reinterpret_cast<uint8_t*>(g_base + rva::kPlayGate);
+    const uint8_t gate_expect[5] = {0xB8, 0x02, 0x00, 0x00, 0x00};
+    const uint8_t gate_open[5]   = {0xB8, 0x00, 0x00, 0x00, 0x00};
+    if (memcmp(gate, gate_expect, 5) == 0 && write_code(gate, gate_open, 5)) logf("play gate open");
+    else logf("play gate: unexpected bytes, card hud will stay visible"), g_hideCards = false;
 }
 
 static void frame() {
@@ -390,6 +449,37 @@ static void frame() {
     }
     update_menu();
     park_deck_cursor(deck);
+
+    ULONGLONG now = GetTickCount64();
+    float dt = g_lastTick ? (now - g_lastTick) / 1000.0f : 0;
+    g_lastTick = now;
+    if (dt > 0.25f) dt = 0.25f;   // long gaps are pauses or loads, not play time
+    if (g_mpCharging) {
+        g_mp += kMpMax * dt / kMpChargeSeconds;
+        if (g_mp >= kMpMax) {
+            g_mp = kMpMax;
+            g_mpCharging = false;
+        }
+    }
+    overlay_state().mp = g_mp / kMpMax;
+    overlay_state().mpCharging = g_mpCharging;
+
+    // F6 shows the card stack again, for comparing against the original HUD
+    bool hideKey = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+    if (hideKey && !g_hideKeyDown) {
+        g_hideCards = !g_hideCards;
+        logf("card hud %s", g_hideCards ? "hidden" : "shown");
+        if (!g_hideCards) {
+            uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
+            reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f & ~kFlagHidePlayerCards);
+        }
+    }
+    g_hideKeyDown = hideKey;
+    if (g_hideCards) {
+        uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
+        if (!(f & kFlagHidePlayerCards))
+            reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | kFlagHidePlayerCards);
+    }
 
     // out of cards: finish a reload straight away
     if (at<int32_t>(deck + kDkState) == 1 && at<int16_t>(deck + kDkCardsLeft) == 0) {

@@ -14,6 +14,10 @@ struct OverlayState {
     int subCount = 0;
     int subSelected = 0;
     const char* subNames[kMaxEntries] = {};
+
+    // MP gauge
+    float mp = 1.0f;          // 0..1
+    bool mpCharging = false;  // empty and refilling, magic unavailable
 };
 
 OverlayState& overlay_state();

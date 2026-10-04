@@ -385,6 +385,33 @@ void draw_menu() {
     }
 }
 
+// MP bar under Sora's portrait. Blue normally, pink while it recharges from
+// empty, like KH2's MP Charge.
+void draw_mp() {
+    const OverlayState st = g_state;
+    const float s = g_h / 1080.0f;
+    const float x = 70 * s, y = 306 * s, w = 230 * s, h = 14 * s;
+    float f = st.mp < 0 ? 0 : (st.mp > 1 ? 1 : st.mp);
+
+    const float frame[4]  = {0.02f, 0.03f, 0.08f, 0.85f};
+    const float back[4]   = {0.10f, 0.12f, 0.20f, 0.85f};
+    const float blueL[4]  = {0.20f, 0.45f, 1.00f, 1.0f};
+    const float blueR[4]  = {0.45f, 0.80f, 1.00f, 1.0f};
+    const float pinkL[4]  = {0.85f, 0.20f, 0.60f, 1.0f};
+    const float pinkR[4]  = {1.00f, 0.55f, 0.80f, 1.0f};
+    const float label[4]  = {0.80f, 0.90f, 1.00f, 1.0f};
+    const float labelC[4] = {1.00f, 0.70f, 0.88f, 1.0f};
+    const float shadow[4] = {0, 0, 0, 0.6f};
+
+    quad(x - 3 * s, y - 3 * s, w + 6 * s, h + 6 * s, frame, frame, 4 * s);
+    quad(x, y, w, h, back, back, 4 * s);
+    if (f > 0) quad(x, y, w * f, h, st.mpCharging ? pinkL : blueL, st.mpCharging ? pinkR : blueR, 4 * s);
+
+    const char* name = st.mpCharging ? "MP CHARGE" : "MP";
+    text(x + w + 12 * s + 1 * s, y - 6 * s + 1 * s, 24 * s, name, shadow);
+    text(x + w + 12 * s, y - 6 * s, 24 * s, name, st.mpCharging ? labelC : label);
+}
+
 void bind_and_draw(ID3D11RenderTargetView* rtv) {
     D3D11_VIEWPORT vp{0, 0, g_w, g_h, 0, 1};
     const FLOAT factor[4] = {0, 0, 0, 0};
@@ -410,6 +437,7 @@ bool fill_vertices(UINT width, UINT height) {
     g_h = static_cast<float>(height);
     g_verts.clear();
     draw_menu();
+    draw_mp();
     if (g_verts.empty()) return false;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(g_ctx->Map(g_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return false;
