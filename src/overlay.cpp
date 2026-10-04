@@ -13,7 +13,9 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_4.h>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -34,7 +36,7 @@ constexpr int kAtlas = 512;
 constexpr int kFontPx = 40;
 constexpr int kFirstChar = 32;
 constexpr int kLastChar = 126;
-constexpr size_t kMaxVerts = 4096;
+constexpr size_t kMaxVerts = 8192;
 
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 using Present1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
@@ -56,13 +58,16 @@ ID3D11RasterizerState* g_raster = nullptr;
 ID3D11DepthStencilState* g_depth = nullptr;
 ID3D11SamplerState* g_sampler = nullptr;
 ID3D11ShaderResourceView* g_font = nullptr;
+ID3D11ShaderResourceView* g_face = nullptr;   // Sora's portrait, optional
 IDXGISwapChain* g_target = nullptr;
 bool g_ready = false;
 bool g_failed = false;
 
 Glyph g_glyphs[kLastChar - kFirstChar + 1];
 float g_whiteU = 0, g_whiteV = 0;   // a solid texel in the atlas, for flat quads
-std::vector<Vertex> g_verts;
+std::vector<Vertex> g_verts;       // drawn with the font atlas
+std::vector<Vertex> g_faceVerts;   // drawn with the portrait texture, on top
+std::vector<Vertex>* g_out = &g_verts;
 float g_w = 1, g_h = 1;
 
 const char* kShader = R"(
@@ -71,7 +76,7 @@ struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; float4 col : COL
 Texture2D tex : register(t0);
 SamplerState smp : register(s0);
 VSOut vs(VSIn i) { VSOut o; o.pos = float4(i.pos, 0, 1); o.uv = i.uv; o.col = i.col; return o; }
-float4 ps(VSOut i) : SV_TARGET { return float4(i.col.rgb, i.col.a * tex.Sample(smp, i.uv).a); }
+float4 ps(VSOut i) : SV_TARGET { float4 t = tex.Sample(smp, i.uv); return float4(i.col.rgb * t.rgb, i.col.a * t.a); }
 )";
 
 bool step(const char* what, HRESULT hr) {
@@ -147,6 +152,43 @@ bool build_font() {
     HRESULT hr = g_dev->CreateShaderResourceView(tex, nullptr, &g_font);
     tex->Release();
     return step("font view", hr);
+}
+
+// The portrait is cut from the game's own files by tools_dev/make_assets.py and
+// sits in an assets folder next to this module. Without it a plain disc is drawn.
+void load_face() {
+    char path[MAX_PATH];
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&load_face), &self);
+    DWORD n = GetModuleFileNameA(self, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != '\\' && path[n - 1] != '/') --n;
+    if (n == 0 || n + 20 >= MAX_PATH) return;
+    strcpy_s(path + n, MAX_PATH - n, "assets\\face.rgba");
+
+    const int size = 256;
+    std::vector<uint8_t> px(size * size * 4);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) {
+        if (g_log) g_log("overlay: no portrait at %s", path);
+        return;
+    }
+    size_t got = fread(px.data(), 1, px.size(), f);
+    fclose(f);
+    if (got != px.size()) return;
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = size;
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd{px.data(), size * 4, 0};
+    ID3D11Texture2D* tex = nullptr;
+    if (FAILED(g_dev->CreateTexture2D(&td, &sd, &tex))) return;
+    g_dev->CreateShaderResourceView(tex, nullptr, &g_face);
+    tex->Release();
 }
 
 bool compile(const char* entry, const char* target, ID3DBlob** out) {
@@ -290,14 +332,15 @@ bool init(IDXGISwapChain* sc) {
         if (g_log) g_log("overlay: building the font atlas failed");
         return false;
     }
+    load_face();
     return true;
 }
 
 // --- drawing, coordinates in backbuffer pixels ---
 
 void vert(float x, float y, float u, float v, const float c[4]) {
-    if (g_verts.size() >= kMaxVerts) return;
-    g_verts.push_back({x / g_w * 2 - 1, 1 - y / g_h * 2, u, v, c[0], c[1], c[2], c[3]});
+    if (g_verts.size() + g_faceVerts.size() >= kMaxVerts) return;
+    g_out->push_back({x / g_w * 2 - 1, 1 - y / g_h * 2, u, v, c[0], c[1], c[2], c[3]});
 }
 
 // Quad with separate colours on the left and right edge, and a horizontal skew
@@ -385,31 +428,127 @@ void draw_menu() {
     }
 }
 
-// MP bar under Sora's portrait. Blue normally, pink while it recharges from
-// empty, like KH2's MP Charge.
-void draw_mp() {
+const float kPi = 3.14159265f;
+
+// Ring segment between two angles (radians, 0 = right, clockwise on screen),
+// inner colour on the inside edge and outer on the outside.
+void arc(float cx, float cy, float r0, float r1, float a0, float a1, const float inner[4], const float outer[4]) {
+    const int steps = 48;
+    const float u = g_whiteU, v = g_whiteV;
+    for (int i = 0; i < steps; ++i) {
+        float t0 = a0 + (a1 - a0) * i / steps;
+        float t1 = a0 + (a1 - a0) * (i + 1) / steps;
+        float c0 = cosf(t0), s0 = sinf(t0), c1 = cosf(t1), s1 = sinf(t1);
+        vert(cx + r0 * c0, cy + r0 * s0, u, v, inner);
+        vert(cx + r1 * c0, cy + r1 * s0, u, v, outer);
+        vert(cx + r0 * c1, cy + r0 * s1, u, v, inner);
+        vert(cx + r1 * c0, cy + r1 * s0, u, v, outer);
+        vert(cx + r1 * c1, cy + r1 * s1, u, v, outer);
+        vert(cx + r0 * c1, cy + r0 * s1, u, v, inner);
+    }
+}
+
+void disc(float cx, float cy, float r, const float col[4]) { arc(cx, cy, 0, r, 0, 2 * kPi, col, col); }
+
+// One KH2 style gauge: a bar that runs in from the left under the portrait and
+// then wraps up around its right side to the top. `fill` is 0..1 and empties
+// from the far left end first.
+void gauge(float cx, float cy, float r0, float r1, float barLen, float fill, const float top[4],
+           const float bottom[4]) {
+    const float arcLen = kPi * (r0 + r1) / 2;
+    const float filled = (arcLen + barLen) * fill;
+    if (filled <= 0) return;
+    if (filled >= arcLen) {
+        arc(cx, cy, r0, r1, -kPi / 2, kPi / 2, top, bottom);
+        float w = filled - arcLen;
+        if (w > 0) {
+            // straight part: its top edge is the inner radius at the bottom of the ring
+            const float u = g_whiteU, v = g_whiteV;
+            float x0 = cx - w, x1 = cx, y0 = cy + r0, y1 = cy + r1;
+            vert(x0, y0, u, v, top);
+            vert(x1, y0, u, v, top);
+            vert(x0, y1, u, v, bottom);
+            vert(x1, y0, u, v, top);
+            vert(x1, y1, u, v, bottom);
+            vert(x0, y1, u, v, bottom);
+        }
+    } else {
+        arc(cx, cy, r0, r1, -kPi / 2, -kPi / 2 + kPi * filled / arcLen, top, bottom);
+    }
+}
+
+// Status HUD in KH2's place, bottom right: portrait, HP wrapped around it and
+// MP as a straight bar above the HP bar.
+void draw_status() {
     const OverlayState st = g_state;
     const float s = g_h / 1080.0f;
-    const float x = 70 * s, y = 306 * s, w = 230 * s, h = 14 * s;
-    float f = st.mp < 0 ? 0 : (st.mp > 1 ? 1 : st.mp);
+    const float cx = g_w - 150 * s, cy = g_h - 160 * s;
+    const float rFace = 74 * s;
+    const float r0 = rFace + 8 * s, r1 = r0 + 22 * s;   // HP ring
+    const float edge = 4 * s;
 
-    const float frame[4]  = {0.02f, 0.03f, 0.08f, 0.85f};
-    const float back[4]   = {0.10f, 0.12f, 0.20f, 0.85f};
-    const float blueL[4]  = {0.20f, 0.45f, 1.00f, 1.0f};
-    const float blueR[4]  = {0.45f, 0.80f, 1.00f, 1.0f};
-    const float pinkL[4]  = {0.85f, 0.20f, 0.60f, 1.0f};
-    const float pinkR[4]  = {1.00f, 0.55f, 0.80f, 1.0f};
-    const float label[4]  = {0.80f, 0.90f, 1.00f, 1.0f};
-    const float labelC[4] = {1.00f, 0.70f, 0.88f, 1.0f};
-    const float shadow[4] = {0, 0, 0, 0.6f};
+    float hpMax = st.hpMax > 0 ? static_cast<float>(st.hpMax) : 1;
+    float hpFill = st.hp <= 0 ? 0 : (st.hp >= st.hpMax ? 1 : st.hp / hpMax);
+    float hpBar = hpMax * 2.2f;                          // longer bar for more max HP
+    hpBar = (hpBar < 80 ? 80 : (hpBar > 560 ? 560 : hpBar)) * s;
 
-    quad(x - 3 * s, y - 3 * s, w + 6 * s, h + 6 * s, frame, frame, 4 * s);
-    quad(x, y, w, h, back, back, 4 * s);
-    if (f > 0) quad(x, y, w * f, h, st.mpCharging ? pinkL : blueL, st.mpCharging ? pinkR : blueR, 4 * s);
+    const float black[4]   = {0.02f, 0.02f, 0.03f, 0.95f};
+    const float well[4]    = {0.10f, 0.11f, 0.13f, 0.90f};
+    const float hpTop[4]   = {0.55f, 0.95f, 0.25f, 1.0f};
+    const float hpBot[4]   = {0.15f, 0.62f, 0.10f, 1.0f};
+    const float lowTop[4]  = {1.00f, 0.55f, 0.20f, 1.0f};
+    const float lowBot[4]  = {0.80f, 0.15f, 0.10f, 1.0f};
+    const float mpTop[4]   = {0.45f, 0.75f, 1.00f, 1.0f};
+    const float mpBot[4]   = {0.12f, 0.32f, 0.90f, 1.0f};
+    const float chTop[4]   = {1.00f, 0.60f, 0.85f, 1.0f};
+    const float chBot[4]   = {0.80f, 0.15f, 0.55f, 1.0f};
+    const float rim[4]     = {0.85f, 0.88f, 0.95f, 1.0f};
+    const float faceBg[4]  = {0.05f, 0.06f, 0.10f, 1.0f};
+    const float white[4]   = {1, 1, 1, 1};
+    const float pink[4]    = {1.00f, 0.70f, 0.88f, 1.0f};
+    const float shadow[4]  = {0, 0, 0, 0.6f};
 
-    const char* name = st.mpCharging ? "MP CHARGE" : "MP";
-    text(x + w + 12 * s + 1 * s, y - 6 * s + 1 * s, 24 * s, name, shadow);
-    text(x + w + 12 * s, y - 6 * s, 24 * s, name, st.mpCharging ? labelC : label);
+    // HP: outline, empty well, then the fill
+    gauge(cx, cy, r0 - edge, r1 + edge, hpBar + edge, 1, black, black);
+    gauge(cx, cy, r0, r1, hpBar, 1, well, well);
+    bool low = hpFill <= 0.25f;
+    gauge(cx, cy, r0, r1, hpBar, hpFill, low ? lowTop : hpTop, low ? lowBot : hpBot);
+
+    // MP: straight bar above the HP bar, ending where it meets the ring
+    const float mh = 14 * s;
+    const float my1 = cy + r0 - 8 * s, my0 = my1 - mh;
+    float dy = my0 - cy;
+    float reach = (r1 + edge) * (r1 + edge) - dy * dy;
+    float mx1 = cx - (reach > 0 ? sqrtf(reach) : 0) - 6 * s;
+    float mw = 200 * s;
+    float mpFill = st.mp < 0 ? 0 : (st.mp > 1 ? 1 : st.mp);
+    quad(mx1 - mw - edge, my0 - edge, mw + 2 * edge, mh + 2 * edge, black, black);
+    quad(mx1 - mw, my0, mw, mh, well, well);
+    if (mpFill > 0) {
+        const float* t = st.mpCharging ? chTop : mpTop;
+        const float* b = st.mpCharging ? chBot : mpBot;
+        const float u = g_whiteU, v = g_whiteV;
+        float x0 = mx1 - mw * mpFill;
+        vert(x0, my0, u, v, t);
+        vert(mx1, my0, u, v, t);
+        vert(x0, my1, u, v, b);
+        vert(mx1, my0, u, v, t);
+        vert(mx1, my1, u, v, b);
+        vert(x0, my1, u, v, b);
+    }
+    if (st.mpCharging) {
+        text(mx1 - mw + 2 * s, my0 - 30 * s + 2 * s, 24 * s, "MP CHARGE", shadow);
+        text(mx1 - mw, my0 - 30 * s, 24 * s, "MP CHARGE", pink);
+    }
+
+    // portrait
+    disc(cx, cy, rFace + 5 * s, rim);
+    disc(cx, cy, rFace, faceBg);
+    if (g_face) {
+        g_out = &g_faceVerts;
+        quad(cx - rFace, cy - rFace, 2 * rFace, 2 * rFace, white, white, 0, 0, 0, 1, 1);
+        g_out = &g_verts;
+    }
 }
 
 void bind_and_draw(ID3D11RenderTargetView* rtv) {
@@ -430,18 +569,26 @@ void bind_and_draw(ID3D11RenderTargetView* rtv) {
     g_ctx->PSSetShaderResources(0, 1, &g_font);
     g_ctx->PSSetSamplers(0, 1, &g_sampler);
     g_ctx->Draw(static_cast<UINT>(g_verts.size()), 0);
+    if (!g_faceVerts.empty() && g_face) {
+        g_ctx->PSSetShaderResources(0, 1, &g_face);
+        g_ctx->Draw(static_cast<UINT>(g_faceVerts.size()), static_cast<UINT>(g_verts.size()));
+    }
 }
 
 bool fill_vertices(UINT width, UINT height) {
     g_w = static_cast<float>(width);
     g_h = static_cast<float>(height);
     g_verts.clear();
+    g_faceVerts.clear();
+    g_out = &g_verts;
     draw_menu();
-    draw_mp();
+    draw_status();
     if (g_verts.empty()) return false;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(g_ctx->Map(g_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return false;
     memcpy(map.pData, g_verts.data(), g_verts.size() * sizeof(Vertex));
+    memcpy(static_cast<Vertex*>(map.pData) + g_verts.size(), g_faceVerts.data(),
+           g_faceVerts.size() * sizeof(Vertex));
     g_ctx->Unmap(g_vb, 0);
     return true;
 }

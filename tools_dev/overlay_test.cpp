@@ -54,9 +54,12 @@ int main(int argc, char** argv) {
     overlay_state().visible = true;
     overlay_state().selected = selected;
     overlay_state().mp = 0.62f;
+    overlay_state().hp = 54;
+    overlay_state().hpMax = 80;
     if (argc > 5) {
         overlay_state().mp = 0.3f;
         overlay_state().mpCharging = true;
+        overlay_state().hp = 14;
         // any fifth argument: show a submenu instead, "selected" picks the row
         static const char* names[] = {"Fire", "Blizzard", "Thunder", "Cure", "Gravity", "Stop"};
         OverlayState& o = overlay_state();

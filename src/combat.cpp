@@ -35,14 +35,19 @@ constexpr uintptr_t kPlayGate    = 0x16CF3E;  // mov eax,2: the bit that blocks 
 // card HUD and normally also stops the player playing cards (cutscenes use it).
 constexpr int kFlagGroup = 1;
 constexpr int kFlagCards = 0xE2;
+constexpr uint32_t kFlagHidePlayerGauge = 1;   // portrait and HP ring, top left
 constexpr uint32_t kFlagHidePlayerCards = 2;
+constexpr uint32_t kFlagHideHud = kFlagHidePlayerGauge | kFlagHidePlayerCards;
 
 constexpr uint32_t kObjBattle = 0x16;
 
 // player object
 constexpr uintptr_t kPlDeck = 0x3F0;
+constexpr uintptr_t kPlHp = 0x42C;
+constexpr uintptr_t kPlHpMax = 0x430;
 
 // deck object
+constexpr uintptr_t kDkFrameMs   = 0x14;  // s32, game time this frame in ms, 0 while paused
 constexpr uintptr_t kDkHandle    = 0x58;
 constexpr uintptr_t kDkSide      = 0x5C;
 constexpr uintptr_t kDkState     = 0x60;  // 1 = idle, 2 = reloading
@@ -141,7 +146,6 @@ constexpr float kMpMax = 100.0f;
 constexpr float kMpChargeSeconds = 20.0f;
 static float g_mp = kMpMax;
 static bool g_mpCharging = false;
-static ULONGLONG g_lastTick = 0;
 static bool g_hideCards = true;
 static bool g_hideKeyDown = false;
 static WORD g_padPrev = 0;
@@ -450,10 +454,9 @@ static void frame() {
     update_menu();
     park_deck_cursor(deck);
 
-    ULONGLONG now = GetTickCount64();
-    float dt = g_lastTick ? (now - g_lastTick) / 1000.0f : 0;
-    g_lastTick = now;
-    if (dt > 0.25f) dt = 0.25f;   // long gaps are pauses or loads, not play time
+    // the game's own frame time, so nothing here runs while it is paused
+    float dt = at<int32_t>(deck + kDkFrameMs) / 1000.0f;
+    if (dt < 0 || dt > 0.25f) dt = 0;
     if (g_mpCharging) {
         g_mp += kMpMax * dt / kMpChargeSeconds;
         if (g_mp >= kMpMax) {
@@ -463,22 +466,25 @@ static void frame() {
     }
     overlay_state().mp = g_mp / kMpMax;
     overlay_state().mpCharging = g_mpCharging;
+    uintptr_t player = at<uintptr_t>(g_base + rva::kPlayerPtr);
+    overlay_state().hp = at<int32_t>(player + kPlHp);
+    overlay_state().hpMax = at<int32_t>(player + kPlHpMax);
 
-    // F6 shows the card stack again, for comparing against the original HUD
+    // F6 shows the game's own HUD again, for comparing against the original
     bool hideKey = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
     if (hideKey && !g_hideKeyDown) {
         g_hideCards = !g_hideCards;
-        logf("card hud %s", g_hideCards ? "hidden" : "shown");
+        logf("game hud %s", g_hideCards ? "hidden" : "shown");
         if (!g_hideCards) {
             uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
-            reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f & ~kFlagHidePlayerCards);
+            reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f & ~kFlagHideHud);
         }
     }
     g_hideKeyDown = hideKey;
     if (g_hideCards) {
         uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
-        if (!(f & kFlagHidePlayerCards))
-            reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | kFlagHidePlayerCards);
+        if ((f & kFlagHideHud) != kFlagHideHud)
+            reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | kFlagHideHud);
     }
 
     // out of cards: finish a reload straight away
