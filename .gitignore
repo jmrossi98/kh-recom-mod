@@ -1,0 +1,18 @@
+# third-party tools and game data, never commit
+/tools/
+/extracted/
+/re/recom.exe
+/re/ghidra/
+/re/decomp/
+/re/notes/
+
+# build output
+/build/
+
+# scratch files from the memory tools
+/re/memscan_state.json
+/re/snap_*.pkl
+/re/diff_*.txt
+__pycache__/
+
+.vscode/
