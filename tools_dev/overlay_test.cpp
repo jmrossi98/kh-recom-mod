@@ -1,7 +1,7 @@
 // Renders the overlay into an offscreen swap chain and saves the result as a
 // BMP, so the menu can be worked on without starting the game.
 //
-//   overlay_test.exe out.bmp [width height] [selected]
+//   overlay_test.exe out.bmp [width height] [selected] [sub]
 #include "../src/overlay.h"
 
 #include <windows.h>
@@ -53,6 +53,16 @@ int main(int argc, char** argv) {
 
     overlay_state().visible = true;
     overlay_state().selected = selected;
+    if (argc > 5) {
+        // any fifth argument: show a submenu instead, "selected" picks the row
+        static const char* names[] = {"Fire", "Blizzard", "Thunder", "Cure", "Gravity", "Stop"};
+        OverlayState& o = overlay_state();
+        o.subOpen = true;
+        o.subTitle = "MAGIC";
+        o.subCount = 6;
+        o.subSelected = selected;
+        for (int i = 0; i < 6; ++i) o.subNames[i] = names[i];
+    }
     if (!overlay_draw_now(sc, &logf)) { printf("overlay did not initialise\n"); return 1; }
 
     D3D11_TEXTURE2D_DESC td;

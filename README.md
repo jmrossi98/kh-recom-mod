@@ -7,14 +7,25 @@ Very much a work in progress.
 
 ## What works
 
-- Attack always swings a Kingdom Key 9, whatever card is selected, and never
-  uses the card up
-- Magic and item cards play as themselves and stay in the deck
+- KH2 style command menu in battle: Attack, Magic, Items, Summon. Up/down
+  (D-pad or arrow keys) move the cursor, the game's confirm button acts,
+  B / Backspace / left backs out of a list
+- Attack always swings a Kingdom Key 9 and never uses a card up
+- Magic, Items and Summon open a list built from what is in the deck. Nothing
+  leaves the deck when used
 - No card breaks: the two sides' cards never interact, so nothing gets broken
   or refused in either direction
+- The deck can no longer be scrolled or switched by the player, the menu owns
+  those buttons
 - Reloading is instant
-- A KH2 style command menu is drawn in battle (display only for now, the card
-  stack is still there underneath)
+
+## Not done yet
+
+- The card stack is still drawn underneath the menu
+- Magic and items are free, there is no MP
+- Enemies still play cards
+- Enemy cards and friend cards are unreachable (they live on the deck's second row)
+- Menu art is placeholder shapes and a system font
 
 ## Layout
 

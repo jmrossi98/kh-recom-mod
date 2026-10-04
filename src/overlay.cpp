@@ -327,10 +327,11 @@ void text(float x, float y, float px, const char* s, const float col[4]) {
 
 void draw_menu() {
     static const char* kItems[4] = {"Attack", "Magic", "Items", "Summon"};
+    const int kRows = 4;
     const float s = g_h / 1080.0f;
     const float rowH = 46 * s, rowW = 300 * s, gap = 4 * s;
     const float x0 = 48 * s;
-    const float y0 = g_h - 60 * s - 4 * (rowH + gap);
+    const float y0 = g_h - 60 * s - kRows * (rowH + gap);
 
     const float headL[4] = {0.05f, 0.10f, 0.32f, 0.92f};
     const float headR[4] = {0.05f, 0.10f, 0.32f, 0.0f};
@@ -342,19 +343,45 @@ void draw_menu() {
     const float gold[4]  = {1.00f, 0.86f, 0.25f, 1.00f};
     const float white[4] = {1, 1, 1, 1};
     const float dim[4]   = {0.80f, 0.86f, 1.00f, 0.90f};
+    const float faint[4] = {0.80f, 0.86f, 1.00f, 0.45f};
     const float shadow[4] = {0, 0, 0, 0.6f};
 
-    quad(x0, y0 - 30 * s, 190 * s, 26 * s, headL, headR, 8 * s);
-    text(x0 + 14 * s, y0 - 30 * s, 24 * s, "COMMAND", dim);
+    // copy once: the game thread can change this while we draw
+    const OverlayState st = g_state;
+    const bool sub = st.subOpen;
 
-    for (int i = 0; i < 4; ++i) {
-        bool sel = i == g_state.selected;
+    quad(x0, y0 - 30 * s, 190 * s, 26 * s, headL, headR, 8 * s);
+    text(x0 + 14 * s, y0 - 30 * s, 24 * s, sub ? st.subTitle : "COMMAND", dim);
+
+    // the submenu shows a window of kRows entries around the selection
+    int first = 0;
+    if (sub && st.subSelected >= kRows) first = st.subSelected - kRows + 1;
+
+    for (int i = 0; i < kRows; ++i) {
+        const char* label;
+        bool sel;
+        if (sub) {
+            int e = first + i;
+            if (e >= st.subCount) {
+                if (st.subCount == 0 && i == 0) {
+                    float y = y0;
+                    quad(x0, y, rowW, rowH, rowL, rowR, 10 * s);
+                    text(x0 + 30 * s, y + 5 * s, 36 * s, "Nothing", faint);
+                }
+                continue;
+            }
+            label = st.subNames[e] ? st.subNames[e] : "?";
+            sel = e == st.subSelected;
+        } else {
+            label = kItems[i];
+            sel = i == st.selected;
+        }
         float x = x0 + (sel ? 18 * s : 0);
         float y = y0 + i * (rowH + gap);
         quad(x, y, rowW, rowH, sel ? selL : rowL, sel ? selR : rowR, 10 * s);
         quad(x, y, 6 * s, rowH, sel ? gold : edge, sel ? gold : edge, 10 * s);
-        text(x + 30 * s + 2 * s, y + 5 * s + 2 * s, 36 * s, kItems[i], shadow);
-        text(x + 30 * s, y + 5 * s, 36 * s, kItems[i], sel ? white : dim);
+        text(x + 30 * s + 2 * s, y + 5 * s + 2 * s, 36 * s, label, shadow);
+        text(x + 30 * s, y + 5 * s, 36 * s, label, sel ? white : dim);
     }
 }
 
