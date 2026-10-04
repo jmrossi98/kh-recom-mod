@@ -13,12 +13,19 @@ Very much a work in progress.
 - No card breaks: the two sides' cards never interact, so nothing gets broken
   or refused in either direction
 - Reloading is instant
+- A KH2 style command menu is drawn in battle (display only for now, the card
+  stack is still there underneath)
 
 ## Layout
 
 - `scripts/battle.lua` - LuaBackend script. Does the simple memory tweaks and
   loads the dll.
-- `src/combat.cpp` - native side, hooks the game's play-card call.
+- `src/combat.cpp` - native side, hooks the game's play-card call and the card
+  battle update.
+- `src/overlay.cpp` - draws the command menu over the game. The game presents
+  from a D3D12 swap chain, so this hooks Present and draws through D3D11On12.
+- `tools_dev/` - small test programs that render the menu to a BMP without the
+  game, one on a D3D11 swap chain and one on D3D12. Build with `build_test.bat`.
 - `re/` - tools I use for poking at the game: a memory scanner, a snapshot
   differ, a watcher for the card battle state, and Ghidra headless scripts
   (xrefs, decompile, disassemble).

@@ -1,6 +1,8 @@
 // Native side of the Re:CoM combat mod. Loaded from battle.lua with
 // package.loadlib and driven once per game frame through rc_frame().
 // Steam build only: every address below is an RVA into the game exe.
+#include "overlay.h"
+
 #include <windows.h>
 #include <cstdint>
 #include <cstdio>
@@ -203,6 +205,7 @@ static void install_hooks() {
 
 static void frame() {
     uintptr_t deck = player_deck();
+    overlay_state().visible = deck != 0;
     if (!deck) return;
 
     // out of cards: finish a reload straight away
@@ -244,6 +247,7 @@ __declspec(dllexport) int rc_frame(void*) {
         open_log();
         logf("loaded, exe base %p", reinterpret_cast<void*>(g_base));
         install_hooks();
+        overlay_install(&logf);
     }
     if (int code = guarded_frame()) {
         logf("exception %08X, disabling", code);
