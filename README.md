@@ -10,6 +10,8 @@ Very much a work in progress.
 - Attack always swings a Kingdom Key 9, whatever card is selected, and never
   uses the card up
 - Magic and item cards play as themselves and stay in the deck
+- No card breaks: the two sides' cards never interact, so nothing gets broken
+  or refused in either direction
 - Reloading is instant
 
 ## Layout
@@ -18,7 +20,8 @@ Very much a work in progress.
   loads the dll.
 - `src/combat.cpp` - native side, hooks the game's play-card call.
 - `re/` - tools I use for poking at the game: a memory scanner, a snapshot
-  differ, and Ghidra headless scripts (xrefs, decompile, disassemble).
+  differ, a watcher for the card battle state, and Ghidra headless scripts
+  (xrefs, decompile, disassemble).
 
 ## Building
 
