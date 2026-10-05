@@ -7,8 +7,10 @@ Very much a work in progress.
 
 ## What works
 
-- KH2 command menu, drawn from KH2's own sheet, layout data and font
-  (Twilight Town's skin for now): Attack, Magic, Items, Summon. Up/down (D-pad
+- KH2 command menu, drawn from KH2's own sheets, layout data and font, with
+  its opening animation: Attack, Magic, Items, Summon. The skin follows the
+  world: KH2's own for the worlds the two games share, its standard menu for
+  the rest (KH2 has no Traverse Town, Wonderland, Monstro or Neverland). Up/down (D-pad
   or arrow keys) move the cursor, the game's confirm button acts, B / Backspace
   / left backs out of a list. Shown outside battle too, where it is only for looks
 - KH2 status gauges bottom right: KH2's portrait of Sora in his KH1 clothes
@@ -30,8 +32,6 @@ Very much a work in progress.
 - Party members: F5 / F7 call Donald / Goofy without a friend card as a test,
   nothing automatic yet
 - Enemy cards are unreachable (they live on the deck's second row)
-- Only the Twilight Town menu skin; no per-world skins yet
-- Menu has no opening animation and the header's smoke is left out
 - Items and summons are free
 
 ## Art

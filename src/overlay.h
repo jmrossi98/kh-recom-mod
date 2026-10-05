@@ -8,6 +8,7 @@ struct OverlayState {
     bool visible = false;   // anything at all: in a battle or walking around
     bool battle = false;    // in a battle: the command menu shows and its header goes red
     int selected = 0;       // highlighted command on the main menu, 0..3
+    int world = 0;          // Re:CoM world number, picks the menu's skin
 
     // Second level (Magic / Items / Summon). Replaces the main rows while open.
     bool subOpen = false;
@@ -25,6 +26,10 @@ struct OverlayState {
 
 OverlayState& overlay_state();
 bool overlay_install(void (*log)(const char* fmt, ...));
+
+// For the test harness: draw as if the menu came up this many frames ago,
+// so any point of its opening animation can be looked at.
+void overlay_test_since(int frames);
 
 // Draws straight into the swap chain's back buffer. For the test harness.
 struct IDXGISwapChain;

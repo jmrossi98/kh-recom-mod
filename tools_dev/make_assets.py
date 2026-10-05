@@ -10,8 +10,8 @@ With a KH2 folder it also writes, from field2d/us:
 
     kh2_gauge.rgba     the gauge sheet (tt0field.2dd), for the HP and MP gauges
     kh2_face.rgba      KH2's HUD portrait of Sora in his KH1 clothes
-    kh2_command.rgba   the command menu sheet (tt0command.2dd)
-    kh2_command.seq    that menu's layout and animation data, flattened
+    cmd_<skin>.rgba    a command menu sheet (<skin>command.2dd), one a world
+    cmd_<skin>.seq     that menu's layout and animation data, flattened
     kh2_font.rgba      the system font sheet (msg/us/fontimage.bar)
     kh2_font.bin       its advance widths (msg/us/fontinfo.bar)
 
@@ -26,6 +26,10 @@ import sys
 import tempfile
 
 from PIL import Image, ImageFilter
+
+# KH2 command menu skins the overlay knows how to pick: the standard one and
+# the worlds Re:CoM shares with KH2. Keep in step with skin_for_world().
+SKINS = ["zz0", "al0", "he0", "nm0", "lm0", "hb0", "po0", "tt0", "di0"]
 
 SIZE = 256
 # portrait disc inside pl_gauge_tm2.dds (1024x512), and how much around it to take
@@ -60,7 +64,7 @@ def colour(c):
     return [((c >> s) & 0xFF) / 128.0 for s in (0, 8, 16, 24)]
 
 
-def write_seq(yml_path, out_path):
+def write_seq(yml_path, out_path, sheet_size):
     """Flattens an `unsequence` YAML into the binary the overlay reads. Keep in
     step with the Seq structs in src/overlay.cpp."""
     import yaml
@@ -68,15 +72,11 @@ def write_seq(yml_path, out_path):
     sprites = b""
     for s in d["Sprites"]:
         sprites += struct.pack("<4f", s["Left"], s["Top"], s["Right"], s["Bottom"])
+        # how far the texture slides a frame (smoke and the like)
+        sprites += struct.pack("<2f", s["UTranslation"], s["VTranslation"])
         # the four colours are the corners: top-left, top-right, bottom-left, bottom-right
         for key in ("ColorLeft", "ColorTop", "ColorRight", "ColorBottom"):
-            c = colour(s[key])
-            # Scrolling sprites (smoke and the like) wrap their texture inside the
-            # sprite's rectangle as they move, which the overlay does not do. Left
-            # in they smear across the sheet, so they are made invisible.
-            if s["UTranslation"] or s["VTranslation"]:
-                c[3] = 0.0
-            sprites += struct.pack("<4f", *c)
+            sprites += struct.pack("<4f", *colour(s[key]))
     parts = b""
     groups = b""
     n_parts = 0
@@ -103,9 +103,16 @@ def write_seq(yml_path, out_path):
                                  a["BounceYStart"], a["BounceYEnd"], a["BounceXCount"], a["BounceYCount"])
             anims += struct.pack("<8f", *(colour(a["ColorStart"]) + colour(a["ColorEnd"])))
         n_anims += len(a_list)
+    # Sprite coordinates are for the original sheet, a power of two just big
+    # enough for them; the remastered one is two or four times that.
+    need = max(max(s["Left"], s["Right"]) for s in d["Sprites"])
+    native = 256
+    while native < need:
+        native *= 2
+    texel = sheet_size[0] / native
     with open(out_path, "wb") as f:
-        f.write(struct.pack("<6I", 0x31514553, len(d["Sprites"]), n_parts, len(d["SpriteGroups"]), n_anims,
-                            len(d["AnimationGroups"])))
+        f.write(struct.pack("<9I", 0x33514553, len(d["Sprites"]), n_parts, len(d["SpriteGroups"]), n_anims,
+                            len(d["AnimationGroups"]), sheet_size[0], sheet_size[1], int(texel * 256)))
         f.write(sprites + parts + groups + anims + anim_groups)
     print("wrote", out_path)
 
@@ -146,22 +153,26 @@ def main():
         print("wrote", os.path.join(out, "kh2_font.rgba"))
 
         us = os.path.join(sys.argv[3], "remastered", "field2d", "us")
-        sheet = Image.open(os.path.join(us, "tt0command.2dd", "US_tt0command_2dd0.png")).convert("RGBA")
-        assert sheet.size == (1024, 512), sheet.size
-        with open(os.path.join(out, "kh2_command.rgba"), "wb") as f:
-            f.write(sheet.tobytes())
-        print("wrote", os.path.join(out, "kh2_command.rgba"))
+        sheet_sizes = {}
+        for skin in SKINS:
+            folder = os.path.join(us, skin + "command.2dd")
+            sheet = Image.open(os.path.join(folder, os.listdir(folder)[0])).convert("RGBA")
+            sheet_sizes[skin] = sheet.size
+            with open(os.path.join(out, "cmd_%s.rgba" % skin), "wb") as f:
+                f.write(sheet.tobytes())
+            print("wrote", os.path.join(out, "cmd_%s.rgba" % skin))
 
     if len(sys.argv) > 4:
         tools = sys.argv[4]
-        with tempfile.TemporaryDirectory() as tmp:
-            src2dd = os.path.join(sys.argv[3], "original", "field2d", "us", "tt0command.2dd")
-            subprocess.run([os.path.join(tools, "OpenKh.Command.Bar.exe"), "unpack", src2dd, "-o", tmp],
-                           check=True, stdout=subprocess.DEVNULL)
-            yml = os.path.join(tmp, "comw.yml")
-            subprocess.run([os.path.join(tools, "OpenKh.Command.Layout.exe"), "unsequence",
-                            os.path.join(tmp, "comw.sqd"), "-o", yml], check=True, stdout=subprocess.DEVNULL)
-            write_seq(yml, os.path.join(out, "kh2_command.seq"))
+        for skin in SKINS:
+            with tempfile.TemporaryDirectory() as tmp:
+                src2dd = os.path.join(sys.argv[3], "original", "field2d", "us", skin + "command.2dd")
+                subprocess.run([os.path.join(tools, "OpenKh.Command.Bar.exe"), "unpack", src2dd, "-o", tmp],
+                               check=True, stdout=subprocess.DEVNULL)
+                yml = os.path.join(tmp, "comw.yml")
+                subprocess.run([os.path.join(tools, "OpenKh.Command.Layout.exe"), "unsequence",
+                                os.path.join(tmp, "comw.sqd"), "-o", yml], check=True, stdout=subprocess.DEVNULL)
+                write_seq(yml, os.path.join(out, "cmd_%s.seq" % skin), sheet_sizes[skin])
 
         with tempfile.TemporaryDirectory() as tmp:
             info = os.path.join(sys.argv[3], "original", "msg", "us", "fontinfo.bar")

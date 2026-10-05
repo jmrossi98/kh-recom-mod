@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS   // getenv is fine for a test tool
 // Same idea as overlay_test.cpp, but with a D3D12 swap chain like the game's,
 // so the D3D11On12 path can be exercised without starting the game.
 //
@@ -116,6 +117,11 @@ int main(int argc, char** argv) {
     overlay_state().mp = 0.62f;
     overlay_state().hp = 54;
     overlay_state().hpMax = 80;
+    // OVERLAY_WORLD picks the menu skin, OVERLAY_FRAMES how many frames to run
+    // before the one that is saved (the menu's opening takes a couple of seconds)
+    if (const char* wv = getenv("OVERLAY_WORLD")) overlay_state().world = atoi(wv);
+    const char* fv = getenv("OVERLAY_FRAMES");
+    overlay_test_since(fv ? atoi(fv) : 100000);
     if (argc > 5) {
         overlay_state().mp = 0.3f;
         overlay_state().mpCharging = true;

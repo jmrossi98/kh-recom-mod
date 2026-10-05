@@ -458,6 +458,7 @@ static void install_hooks() {
 static void frame() {
     uintptr_t deck = player_deck();
     OverlayState& hud = overlay_state();
+    hud.world = at<uint8_t>(g_base + rva::kWorld);
     if (!deck) {
         // every battle starts on Attack with nothing open
         if (g_menu.sub || g_menu.main != kCmdAttack) {

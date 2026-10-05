@@ -250,7 +250,8 @@ size_t load_bytes(const char* name, uint8_t* out, size_t capacity) {
 // each move, scale, tint and fade one sprite group. Format and behaviour follow
 // OpenKH's documentation of the file.
 
-struct SeqSprite { float u0, v0, u1, v1; float col[4][4]; };   // corner colours: left, top, right, bottom
+// us, vs: how far the texture slides each frame, as a fraction of the sheet
+struct SeqSprite { float u0, v0, u1, v1; float us, vs; float col[4][4]; };   // corner colours: left, top, right, bottom
 struct SeqPart { float x0, y0, x1, y1; int sprite; };
 struct SeqRange { int first, count; };
 struct SeqAnim {
@@ -262,13 +263,26 @@ struct SeqAnim {
 struct SeqAnimGroup { int first, count, noLoop, loopStart, loopEnd, last; };
 
 struct Seq {
+    int sheetW = 0, sheetH = 0;   // the remastered sheet, in pixels
+    float texel = 1;              // sheet pixels per unit of sprite coordinate
     std::vector<SeqSprite> sprites;
     std::vector<SeqPart> parts;
     std::vector<SeqRange> groups;
     std::vector<SeqAnim> anims;
     std::vector<SeqAnimGroup> animGroups;
 };
-Seq g_cmdSeq;
+
+// One command menu skin: a world's sheet and its layout data.
+struct Skin {
+    const char* name;
+    ID3D11ShaderResourceView* tex;
+    Seq seq;
+    bool tried;
+};
+Skin g_skins[] = {{"zz0"}, {"al0"}, {"he0"}, {"nm0"}, {"lm0"}, {"hb0"}, {"po0"}, {"tt0"}, {"di0"}};
+Skin* g_skin = nullptr;        // the one being drawn
+unsigned g_menuOpenFrame = 0;  // frame the menu last came up on
+int g_testSince = -1;          // test harness: pretend the menu came up this many frames ago
 
 template <typename T>
 bool read_vec(FILE* f, std::vector<T>& v, uint32_t n) {
@@ -287,11 +301,15 @@ bool load_seq(const char* name, Seq& seq) {
     sprintf_s(path + n, MAX_PATH - n, "assets\\%s", name);
     FILE* f = nullptr;
     if (fopen_s(&f, path, "rb") != 0 || !f) return false;
-    uint32_t head[6] = {};
-    bool ok = fread(head, sizeof(uint32_t), 6, f) == 6 && head[0] == 0x31514553 /* "SEQ1" */ &&
+    uint32_t head[9] = {};
+    bool ok = fread(head, sizeof(uint32_t), 9, f) == 9 && head[0] == 0x33514553 /* "SEQ3" */ &&
               read_vec(f, seq.sprites, head[1]) && read_vec(f, seq.parts, head[2]) &&
               read_vec(f, seq.groups, head[3]) && read_vec(f, seq.anims, head[4]) &&
               read_vec(f, seq.animGroups, head[5]);
+    seq.sheetW = static_cast<int>(head[6]);
+    seq.sheetH = static_cast<int>(head[7]);
+    seq.texel = head[8] / 256.0f;
+    ok = ok && seq.sheetW > 0 && seq.sheetH > 0 && seq.texel > 0;
     fclose(f);
     if (!ok && g_log) g_log("overlay: %s is not a sequence file this build understands", name);
     return ok;
@@ -351,21 +369,54 @@ void seq_draw(const Seq& seq, int group, int frame, float ox, float oy, float un
         for (int p = 0; p < sg.count; ++p) {
             const SeqPart& part = seq.parts[sg.first + p];
             const SeqSprite& sp = seq.sprites[part.sprite];
-            // corners: top-left, top-right, bottom-left, bottom-right
-            const float lx[4] = {part.x0, part.x1, part.x0, part.x1};
-            const float ly[4] = {part.y0, part.y0, part.y1, part.y1};
-            const float lu[4] = {sp.u0, sp.u1, sp.u0, sp.u1};
-            const float lv[4] = {sp.v0, sp.v0, sp.v1, sp.v1};
-            float px[4], py[4], pc[4][4];
-            for (int k = 0; k < 4; ++k) {
-                float vx = (lx[k] + pvx) * sx, vy = (ly[k] + pvy) * sy;
-                px[k] = ox + (vx * cs - vy * sn + x) * unit;
-                py[k] = oy + (vx * sn + vy * cs + y) * unit;
-                for (int c = 0; c < 4; ++c) pc[k][c] = sp.col[k][c] * col[c];
+
+            // A sliding sprite wraps inside its own rectangle, so it is drawn
+            // as up to two strips each way, split where the wrap falls.
+            float fu[3] = {0, 1, 1}, su[2][2] = {{sp.u0, sp.u1}, {0, 0}};
+            float fv[3] = {0, 1, 1}, sv[2][2] = {{sp.v0, sp.v1}, {0, 0}};
+            int nu = 1, nv = 1;
+            const float w = sp.u1 - sp.u0, hgt = sp.v1 - sp.v0;
+            if (sp.us != 0 && w > 0) {
+                float off = fmodf(sp.us * (seq.sheetW / seq.texel) * g_frameNo, w);
+                if (off < 0) off += w;
+                fu[1] = (w - off) / w;
+                su[0][0] = sp.u0 + off; su[0][1] = sp.u1;
+                su[1][0] = sp.u0;       su[1][1] = sp.u0 + off;
+                nu = 2;
             }
-            const int order[6] = {0, 1, 2, 1, 3, 2};
-            for (int k : order)
-                vert(px[k], py[k], lu[k] * kKh2Texel / kKh2SheetW, lv[k] * kKh2Texel / kKh2SheetH, pc[k]);
+            if (sp.vs != 0 && hgt > 0) {
+                float off = fmodf(sp.vs * (seq.sheetH / seq.texel) * g_frameNo, hgt);
+                if (off < 0) off += hgt;
+                fv[1] = (hgt - off) / hgt;
+                sv[0][0] = sp.v0 + off; sv[0][1] = sp.v1;
+                sv[1][0] = sp.v0;       sv[1][1] = sp.v0 + off;
+                nv = 2;
+            }
+
+            for (int iu = 0; iu < nu; ++iu)
+                for (int iv = 0; iv < nv; ++iv) {
+                    const float fx[2] = {fu[iu], fu[iu + 1]}, fy[2] = {fv[iv], fv[iv + 1]};
+                    if (fx[1] <= fx[0] || fy[1] <= fy[0]) continue;
+                    // corners: top-left, top-right, bottom-left, bottom-right
+                    float px[4], py[4], pu[4], pvv[4], pc[4][4];
+                    for (int k = 0; k < 4; ++k) {
+                        const float tx = fx[k & 1], ty = fy[k >> 1];
+                        float lx = part.x0 + (part.x1 - part.x0) * tx, ly = part.y0 + (part.y1 - part.y0) * ty;
+                        float vx = (lx + pvx) * sx, vy = (ly + pvy) * sy;
+                        px[k] = ox + (vx * cs - vy * sn + x) * unit;
+                        py[k] = oy + (vx * sn + vy * cs + y) * unit;
+                        pu[k] = su[iu][k & 1];
+                        pvv[k] = sv[iv][k >> 1];
+                        for (int c = 0; c < 4; ++c) {
+                            float top = sp.col[0][c] * (1 - tx) + sp.col[1][c] * tx;
+                            float bot = sp.col[2][c] * (1 - tx) + sp.col[3][c] * tx;
+                            pc[k][c] = (top * (1 - ty) + bot * ty) * col[c];
+                        }
+                    }
+                    const int order[6] = {0, 1, 2, 1, 3, 2};
+                    for (int k : order)
+                        vert(px[k], py[k], pu[k] * seq.texel / seq.sheetW, pvv[k] * seq.texel / seq.sheetH, pc[k]);
+                }
         }
     }
     g_mode = 1;
@@ -522,11 +573,6 @@ bool init(IDXGISwapChain* sc) {
             g_kfont->Release();
             g_kfont = nullptr;
         }
-    }
-    g_cmd = load_rgba("kh2_command.rgba", kKh2SheetW, kKh2SheetH);
-    if (g_cmd && !load_seq("kh2_command.seq", g_cmdSeq)) {
-        g_cmd->Release();
-        g_cmd = nullptr;
     }
     return true;
 }
@@ -909,11 +955,10 @@ void draw_status() {
 // other worlds' sheets use the same numbering with their own art.
 namespace cmd {
 constexpr int kHeaderField = 17, kHeaderBattle = 30;   // COMMANDS header, cyan and red
-constexpr int kHeaderFrames = 36;            // length of the header's glow, which the game replays
+constexpr int kOpen = 7;                     // the whole menu coming up: header, slots, bottom cap
 constexpr int kSlot = 11;                    // plain slot
 constexpr int kSlotField = 9, kSlotBattle = 22;        // selected slot, glowing
 constexpr int kBottom = 6;                   // cap under the last slot
-constexpr int kCursor = 20;
 constexpr int kIconRing = 45;                // gold ring behind the selected slot's icon
 constexpr float kSelectedShift = 14;         // the selected slot sits this far right
 constexpr int kIcon[4] = {37, 41, 39, 44};   // keyblade, hat, potion, charm
@@ -1002,9 +1047,51 @@ void menu_text(float x, float y, float px, const char* s, const float col[4]) {
     text(x, y, px, s, col);
 }
 
+// Which KH2 skin goes with which Re:CoM world. KH2 has no Traverse Town,
+// Wonderland, Monstro, Neverland or Castle Oblivion, so those get its standard
+// menu; the rest get their own.
+Skin* skin_for_world(int world) {
+    const char* name = "zz0";
+    switch (world) {
+        case 2: name = "al0"; break;    // Agrabah
+        case 3: name = "he0"; break;    // Olympus Coliseum
+        case 6: name = "nm0"; break;    // Halloween Town
+        case 7: name = "lm0"; break;    // Atlantica
+        case 9: name = "hb0"; break;    // Hollow Bastion
+        case 10: name = "po0"; break;   // 100 Acre Wood
+        case 11: name = "tt0"; break;   // Twilight Town
+        case 12: name = "di0"; break;   // Destiny Islands
+    }
+    Skin* fallback = nullptr;
+    Skin* found = nullptr;
+    for (Skin& k : g_skins) {
+        if (!strcmp(k.name, name)) found = &k;
+        if (!strcmp(k.name, "zz0")) fallback = &k;
+    }
+    for (Skin* k : {found, fallback}) {
+        if (!k) continue;
+        if (!k->tried) {
+            k->tried = true;
+            char file[40];
+            sprintf_s(file, "cmd_%s.seq", k->name);
+            if (load_seq(file, k->seq)) {
+                sprintf_s(file, "cmd_%s.rgba", k->name);
+                k->tex = load_rgba(file, k->seq.sheetW, k->seq.sheetH);
+            }
+        }
+        if (k->tex) return k;
+    }
+    return nullptr;
+}
+
+int group_last(const Seq& seq, int group) {
+    return group >= 0 && group < static_cast<int>(seq.animGroups.size()) ? seq.animGroups[group].last : 0;
+}
+
 void draw_menu_kh2() {
     static const char* kItems[4] = {"Attack", "Magic", "Items", "Summon"};
     const OverlayState st = g_state;
+    const Seq& seq = g_skin->seq;
     const float u = kh2_unit();
     const float ox = 37 * u;                                     // measured off KH2 screenshots
     const float oy = g_h - (3 * cmd::kRowPitch + 15 + 18) * u;
@@ -1014,19 +1101,35 @@ void draw_menu_kh2() {
 
     g_out = &g_cmdVerts;
     if (!st.subOpen) {
-        // headers are authored one slot above the menu's origin
-        seq_draw(g_cmdSeq, st.battle ? cmd::kHeaderBattle : cmd::kHeaderField, f % cmd::kHeaderFrames, ox,
-                 oy - cmd::kRowPitch * u, u);
-        seq_draw(g_cmdSeq, cmd::kBottom, f, ox, oy, u);
+        // Coming up: KH2's own opening animation, with the labels fading in
+        // over its last third of a second.
+        const int since = g_testSince >= 0 ? g_testSince : static_cast<int>(g_frameNo - g_menuOpenFrame);
+        const int openLast = group_last(seq, cmd::kOpen);
+        if (since < openLast) {
+            seq_draw(seq, cmd::kOpen, since, ox, oy, u);
+            float fade = (since - (openLast - 20)) / 20.0f;
+            if (fade > 0) {
+                const float c[4] = {dim[0], dim[1], dim[2], fade};
+                g_out = &g_verts;
+                for (int i = 0; i < 4; ++i)
+                    menu_text(ox + 5 * u, oy + (i * cmd::kRowPitch - 6.5f) * u, 12 * u, kItems[i], c);
+            }
+            g_out = &g_verts;
+            return;
+        }
+
+        // headers are authored one slot above the menu's origin, and their glow is replayed
+        const int header = st.battle ? cmd::kHeaderBattle : cmd::kHeaderField;
+        seq_draw(seq, header, f % (group_last(seq, header) + 1), ox, oy - cmd::kRowPitch * u, u);
+        seq_draw(seq, cmd::kBottom, f, ox, oy, u);
         for (int i = 0; i < 4; ++i)
-            if (i != st.selected) seq_draw(g_cmdSeq, cmd::kSlot, f, ox, oy + i * cmd::kRowPitch * u, u);
+            if (i != st.selected) seq_draw(seq, cmd::kSlot, f, ox, oy + i * cmd::kRowPitch * u, u);
         // the selected slot is pushed right and is the only one showing its icon
         const float sx = ox + cmd::kSelectedShift * u;
         const float sy = oy + st.selected * cmd::kRowPitch * u;
-        seq_draw(g_cmdSeq, st.battle ? cmd::kSlotBattle : cmd::kSlotField, f, sx, sy, u);
-        seq_draw(g_cmdSeq, cmd::kIconRing, f, sx, sy, u);
-        seq_draw(g_cmdSeq, cmd::kIcon[st.selected], f, sx, sy, u);
-        seq_draw(g_cmdSeq, cmd::kCursor, f, sx, sy, u);
+        seq_draw(seq, st.battle ? cmd::kSlotBattle : cmd::kSlotField, f, sx, sy, u);
+        seq_draw(seq, cmd::kIconRing, f, sx, sy, u);
+        seq_draw(seq, cmd::kIcon[st.selected], f, sx, sy, u);
         g_out = &g_verts;
         for (int i = 0; i < 4; ++i) {
             bool sel = i == st.selected;
@@ -1035,19 +1138,18 @@ void draw_menu_kh2() {
         return;
     }
 
-    // A list: its own header, then up to four wide slots that scroll with the cursor.
+    // A list: its own header, then up to four wide slots that scroll with the selection.
     const int kind = st.selected >= 1 && st.selected <= 3 ? st.selected : 1;
     const int kRows = 4;
     int first = st.subSelected >= kRows ? st.subSelected - kRows + 1 : 0;
     int shown = st.subCount - first < kRows ? st.subCount - first : kRows;
     if (shown < 1) shown = 1;
-    seq_draw(g_cmdSeq, cmd::kSubHeader[kind], f, ox, oy - cmd::kRowPitch * u, u);
+    const int header = cmd::kSubHeader[kind];
+    seq_draw(seq, header, f % (group_last(seq, header) + 1), ox, oy - cmd::kRowPitch * u, u);
     for (int i = 0; i < shown; ++i) {
         bool sel = first + i == st.subSelected && st.subCount > 0;
-        seq_draw(g_cmdSeq, sel ? cmd::kSubSlotSel[kind] : cmd::kSubSlot, f, ox, oy + i * cmd::kRowPitch * u, u);
+        seq_draw(seq, sel ? cmd::kSubSlotSel[kind] : cmd::kSubSlot, f, ox, oy + i * cmd::kRowPitch * u, u);
     }
-    if (st.subCount > 0)
-        seq_draw(g_cmdSeq, cmd::kCursor, f, ox - 8 * u, oy + (st.subSelected - first) * cmd::kRowPitch * u, u);
     g_out = &g_verts;
     if (st.subCount == 0) {
         menu_text(ox - 4 * u, oy - 6.5f * u, 12 * u, "Nothing", dim);
@@ -1061,7 +1163,9 @@ void draw_menu_kh2() {
 }
 
 void draw_menu() {
-    if (g_cmd) draw_menu_kh2();
+    g_skin = skin_for_world(g_state.world);
+    g_cmd = g_skin ? g_skin->tex : nullptr;
+    if (g_skin) draw_menu_kh2();
     else draw_menu_plain();
 }
 
@@ -1116,6 +1220,10 @@ bool fill_vertices(UINT width, UINT height) {
     g_verts.clear();
     g_out = &g_verts;
     ++g_frameNo;
+    static ULONGLONG lastDraw = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - lastDraw > 300) g_menuOpenFrame = g_frameNo;
+    lastDraw = now;
     draw_menu();
     draw_status();
     if (g_cmdVerts.empty() && g_gaugeVerts.empty() && g_faceVerts.empty() && g_verts.empty() && g_kfontVerts.empty())
@@ -1356,6 +1464,8 @@ bool patch_slot(void** slot, void* hook) {
 }  // namespace
 
 OverlayState& overlay_state() { return g_state; }
+
+void overlay_test_since(int frames) { g_testSince = frames; }
 
 bool overlay_draw_now(IDXGISwapChain* sc, void (*log)(const char* fmt, ...)) {
     g_log = log;
