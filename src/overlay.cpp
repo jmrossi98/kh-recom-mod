@@ -1444,8 +1444,12 @@ void kh1_lit(float x, float y, float width, const kh1::Rect& edge, const kh1::Re
     const unsigned char black[3] = {0, 0, 0};
     kh1_piece(x + 3 * u, y + 3 * u, edge, black, alpha * 0.5f, 1, width);
     kh1_piece(x, y, edge, edgeTint, alpha, 1, width);
-    kh1_quad(x + 6 * u, y + 9 * u, x + (6 + width - inset) * u, y + 22 * u, bottom, mid, glow, alpha);
-    kh1_quad(x + 6 * u, y + 2 * u, x + (6 + width - insetTop) * u, y + 9 * u + 1, top, black, mid, alpha);
+    // The two halves have soft edges where they meet, and laid end to end the
+    // outline shows through as a line. Let each run a unit and a half into
+    // the other, so each one's soft edge lies on the other's solid part.
+    const float lap = 1.5f * u;
+    kh1_quad(x + 6 * u, y + 9 * u - lap, x + (6 + width - inset) * u, y + 22 * u, bottom, mid, glow, alpha);
+    kh1_quad(x + 6 * u, y + 2 * u, x + (6 + width - insetTop) * u, y + 9 * u + lap, top, black, mid, alpha);
 }
 
 // Position of something that moves in a straight line between key frames,
@@ -1467,6 +1471,7 @@ struct Kh1Menu {
     const kh1::Rect* icon;
     const unsigned char* iconTint;
     unsigned cursorAge;       // frames since the cursor landed on its row
+    float headerAlpha;        // the header's own, on top of the menu's: it gives way to the context command
     float iconX;              // icon, from the lit slot's left
     int gapRow;               // a row left empty with no lit slot: where the cursor was when a list opened
     float alpha, bright;      // the whole menu's
@@ -1480,8 +1485,10 @@ void kh1_menu(const Kh1Menu& m) {
     const float label[4] = {labelShade, labelShade, labelShade, m.alpha};
     auto covered = [&](float y) { return y + kh1::kRow * u > m.coverTop + 4 * u && y < m.coverBottom - 4 * u; };
     g_out = &g_cmdVerts;
-    kh1_frame(x, top, m.width, kh1::kHeader, m.look->frame, m.alpha, m.bright);
-    kh1_piece(x + 4 * u, top + 6 * u, *m.word, m.look->word, m.alpha, m.bright);
+    if (m.headerAlpha > 0) {
+        kh1_frame(x, top, m.width, kh1::kHeader, m.look->frame, m.alpha * m.headerAlpha, m.bright);
+        kh1_piece(x + 4 * u, top + 6 * u, *m.word, m.look->word, m.alpha * m.headerAlpha, m.bright);
+    }
     for (int i = 0; i < m.rows; ++i) {
         // the cursor's row has no slot of its own: the lit one stands in the gap
         if (i == m.selected || i == m.gapRow) continue;
@@ -1552,7 +1559,21 @@ void draw_menu_kh1() {
         if (sel == 3 && beside + kh1::kHeaderH + kh1::kRow * shown <= kh1::kListBottom + 1) listY = beside;
     }
 
+    // The context command lies over the header, wider than the menu and
+    // pointing right. It takes 7 frames to come in, sliding the last 10
+    // units, and 7 to fade out where it is. A new label comes in afresh.
+    static const char* shownContext = nullptr;
+    static unsigned contextFrame = 0;
+    static bool contextUp = false;
+    const bool want = st.context && !st.subOpen;
+    if (want != contextUp || (want && st.context != shownContext)) contextUp = want, contextFrame = g_frameNo;
+    if (want) shownContext = st.context;
+    static const float kIn[2] = {0, 7}, kFade[2] = {0, 1}, kContextSlide[2] = {-10, 0};
+    const unsigned contextAge = still ? settled : g_frameNo - contextFrame;
+    const float shade = contextUp ? kh1_keys(contextAge, kIn, kFade, 2) : 1 - kh1_keys(contextAge, kIn, kFade, 2);
+
     Kh1Menu main{};
+    main.headerAlpha = 1 - shade;   // the header makes way for it
     main.x = kh1::kMenuX;
     main.y = kh1::kMenuY;
     main.width = kh1::kMainW;
@@ -1586,6 +1607,7 @@ void draw_menu_kh1() {
         for (int i = 0; i < shown; ++i)
             names[i] = st.subCount == 0 ? "Nothing" : (st.subNames[first + i] ? st.subNames[first + i] : "?");
         Kh1Menu list{};
+        list.headerAlpha = 1;
         list.x = kh1::kMenuX + kh1::kListX + kh1_keys(age, kAt, kSlide, 3);
         list.y = listY;
         list.width = sel == 2 ? kh1::kItemListW : kh1::kListW;
@@ -1605,20 +1627,8 @@ void draw_menu_kh1() {
         kh1_menu(list);
     }
 
-    // The context command lies over the header, wider than the menu and
-    // pointing right. It takes 7 frames to come in, sliding the last 10
-    // units, and 7 to fade out where it is. A new label comes in afresh.
-    static const char* shownContext = nullptr;
-    static unsigned contextFrame = 0;
-    static bool contextUp = false;
-    const bool want = st.context && !st.subOpen;
-    if (want != contextUp || (want && st.context != shownContext)) contextUp = want, contextFrame = g_frameNo;
-    if (want) shownContext = st.context;
-    static const float kIn[2] = {0, 7}, kFade[2] = {0, 1}, kSlide[2] = {-10, 0};
-    const unsigned age = still ? settled : g_frameNo - contextFrame;
-    const float shade = contextUp ? kh1_keys(age, kIn, kFade, 2) : 1 - kh1_keys(age, kIn, kFade, 2);
     if (shownContext && shade > 0) {
-        const float slide = contextUp ? kh1_keys(age, kIn, kSlide, 2) : 0;
+        const float slide = contextUp ? kh1_keys(contextAge, kIn, kContextSlide, 2) : 0;
         const float bx = (kh1::kMenuX - 8 + slide) * u, by = g_h - (kh1::kScreenH - (kh1::kMenuY - 8)) * u;
         g_out = &g_cmdVerts;
         kh1_lit(bx, by, kh1::kContextW, kh1::kContext, kh1::kContextTop, kh1::kContextBottom, kh1::kContextEdge,
