@@ -70,6 +70,7 @@ ID3D11ShaderResourceView* g_face = nullptr;   // Sora's portrait, optional
 ID3D11ShaderResourceView* g_kh2 = nullptr;    // KH2's gauge sheet, optional
 ID3D11ShaderResourceView* g_cmd = nullptr;    // KH2's command menu sheet, optional
 ID3D11ShaderResourceView* g_kfont = nullptr;  // KH2's system font, optional
+ID3D11ShaderResourceView* g_kh1 = nullptr;    // KH1's command menu sheets, optional
 uint8_t g_kfontWidth[512];                    // advance of each glyph, in KH2 units
 int g_kfontCount = 0;
 IDXGISwapChain* g_target = nullptr;
@@ -325,6 +326,10 @@ float mix(float t, float a, float b) { return a * (1 - t) + b * t; }
 // Draws one animation group at a frame. (ox, oy) is the group's origin in
 // pixels and unit the size of one KH2 unit. Frames past the end hold the last
 // frame for one-shot groups and wrap for looping ones.
+// KH2's 2D screen is 512x416 stretched over a 4:3 picture, so one unit across
+// is 13/12 of one unit down.
+constexpr float kUnitAcross = (4.0f / 3) / (512.0f / 416);
+
 void seq_draw(const Seq& seq, int group, int frame, float ox, float oy, float unit, float alpha = 1) {
     if (group < 0 || group >= static_cast<int>(seq.animGroups.size())) return;
     const SeqAnimGroup& ag = seq.animGroups[group];
@@ -403,7 +408,7 @@ void seq_draw(const Seq& seq, int group, int frame, float ox, float oy, float un
                         const float tx = fx[k & 1], ty = fy[k >> 1];
                         float lx = part.x0 + (part.x1 - part.x0) * tx, ly = part.y0 + (part.y1 - part.y0) * ty;
                         float vx = (lx + pvx) * sx, vy = (ly + pvy) * sy;
-                        px[k] = ox + (vx * cs - vy * sn + x) * unit;
+                        px[k] = ox + (vx * cs - vy * sn + x) * unit * kUnitAcross;
                         py[k] = oy + (vx * sn + vy * cs + y) * unit;
                         pu[k] = su[iu][k & 1];
                         pvv[k] = sv[iv][k >> 1];
@@ -566,6 +571,7 @@ bool init(IDXGISwapChain* sc) {
     }
     g_face = load_rgba("kh2_face.rgba", 1024, 512);
     g_kh2 = load_rgba("kh2_gauge.rgba", kKh2SheetW, kKh2SheetH);
+    g_kh1 = load_rgba("kh1_command.rgba", 256, 640);
     g_kfont = load_rgba("kh2_font.rgba", 1024, 512);
     if (g_kfont) {
         g_kfontCount = static_cast<int>(load_bytes("kh2_font.bin", g_kfontWidth, sizeof(g_kfontWidth)));
@@ -803,7 +809,8 @@ void draw_status_plain() {
 // cross-section pulled out to the left from the bottom of the ring.
 
 struct Hud {
-    float cx, cy, unit;   // origin in pixels, pixels per KH2 unit
+    float cx, cy;     // origin in pixels
+    float ux, unit;   // pixels per KH2 unit, across and down
 };
 
 const float kRingR = 45;             // ring quarter is 45x45
@@ -811,13 +818,23 @@ const float kRingR = 45;             // ring quarter is 45x45
 // and the black ring that backs it from 28 to 42.5, which is what gives the
 // gauge its border.
 const float kRingBandIn = 27;        // nothing but transparency inside this
-const float kRingMidR = 35.25f;      // middle of the coloured band, for arc length
 const float kUvCentreV = 105;        // v at the ring's centre
 const float kUvGreenU = 95;          // u at the centre, green quarter
 const float kUvDarkU = 46;           // u at the centre, dark quarter
+const float kUvRedU = 144;           // u at the centre, the quarter shown for lost HP
+
+// KH2's own gauge rules, from its code: the ring takes the first 60 HP at
+// 4.5 degrees each, which is its full three quarters, and every HP past that
+// adds 3 units of bar. Sora starts KH2 with 20 HP and Re:CoM with 80, so
+// Re:CoM's HP is shown at a quarter to give the same gauge at the same point
+// in the game.
+const float kRingHp = 60;
+const float kDegPerHp = 4.5f;
+const float kBarPerHp = 3;
+const float kHpScale = 0.25f;
 
 void hud_vert(const Hud& h, float x, float y, float u, float v, const float c[4]) {
-    vert(h.cx + x * h.unit, h.cy + y * h.unit, u * kKh2Texel / kKh2SheetW, v * kKh2Texel / kKh2SheetH, c);
+    vert(h.cx + x * h.ux, h.cy + y * h.unit, u * kKh2Texel / kKh2SheetW, v * kKh2Texel / kKh2SheetH, c);
 }
 
 // Sprite from the sheet, stretched over a rectangle given in HUD units. A zero
@@ -858,15 +875,31 @@ void hud_ring(const Hud& h, float centreU, float a0, float a1, const float c[4])
     }
 }
 
-// KH2 lays its HUD out on a 416 line screen and pins it to the corners.
+// Sprite turned clockwise about the HUD origin and then moved, for the gauge's
+// end cap. v0 goes with y0 and v1 with y1.
+void hud_sprite_turned(const Hud& h, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
+                       float deg, float tx, float ty, const float c[4]) {
+    const float a = deg * kPi / 180, cs = cosf(a), sn = sinf(a);
+    const float px[4] = {x0, x1, x0, x1}, py[4] = {y0, y0, y1, y1};
+    const float pu[4] = {u0, u1, u0, u1}, pv[4] = {v0, v0, v1, v1};
+    const int order[6] = {0, 1, 2, 1, 3, 2};
+    for (int k : order)
+        hud_vert(h, px[k] * cs - py[k] * sn + tx, px[k] * sn + py[k] * cs + ty, pu[k], pv[k], c);
+}
+
+// KH2 lays its HUD out on a 512x416 screen made for a 4:3 picture, so a unit
+// is a little wider than it is tall, and the HD version keeps that: 416 units
+// down the picture, and across it as many as fit at that shape (682 at 16:9).
+// Everything is pinned to the corners.
 float kh2_unit() { return g_h / 416.0f; }
+float kh2_unit_x() { return kh2_unit() * kUnitAcross; }
 
 // Sprite from the portrait sheet (256x128 in the layout data, four times that
 // remastered), placed in HUD units like the gauge sprites.
 void face_sprite(const Hud& h, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1) {
     const float white[4] = {1, 1, 1, 1};
     const float ku = 4.0f / 1024, kv = 4.0f / 512;
-    const float px0 = h.cx + x0 * h.unit, px1 = h.cx + x1 * h.unit;
+    const float px0 = h.cx + x0 * h.ux, px1 = h.cx + x1 * h.ux;
     const float py0 = h.cy + y0 * h.unit, py1 = h.cy + y1 * h.unit;
     vert(px0, py0, u0 * ku, v0 * kv, white);
     vert(px1, py0, u1 * ku, v0 * kv, white);
@@ -878,23 +911,23 @@ void face_sprite(const Hud& h, float x0, float y0, float x1, float y1, float u0,
 
 void draw_status_kh2() {
     const OverlayState st = g_state;
-    // Everything hangs off the centre of the portrait's frame, which KH2's
-    // layout data pins at (455, 355) on its 512x416 screen: the frame itself,
-    // the portrait and the MP gauge. The HP ring is the one piece the data does
-    // not place; measured on KH2 it sits 4.5 units lower than the frame.
+    // Everything hangs off the centre of the portrait's frame: the frame, the
+    // portrait, the HP ring around it and the MP gauge. KH2's layout data puts
+    // it at (455, 355) on a 512x416 screen and the game keeps that distance
+    // from the right edge on a wide one, so 57 units in and 61 up.
     Hud o;
     o.unit = kh2_unit();
-    o.cx = g_w - 60 * o.unit;
+    o.ux = kh2_unit_x();
+    o.cx = g_w - (512 - 455) * o.ux;
     o.cy = g_h - (416 - 355) * o.unit;
-    Hud h = o;
-    h.cy += 4.5f * o.unit;
+    const Hud& h = o;
 
+    const bool full = st.gauge;   // frame, portrait and HP; otherwise MP alone
     const float white[4] = {1, 1, 1, 1};
-    const float black[4] = {0, 0, 0, 1};
     const float mpWell[4]   = {0.031f, 0.086f, 0.656f, 1};   // tints straight from the layout data
     const float mpCharge[4] = {1.31f, 0.156f, 1.05f, 1};
     const float mpTag[4]    = {0.60f, 1.00f, 1.56f, 1};
-    const float mpTagCh[4]  = {1.56f, 0.45f, 1.10f, 1};
+    const float mpTagCh[4]  = {1.56f, 0.59f, 0.76f, 1};
 
     g_out = &g_gaugeVerts;
 
@@ -909,28 +942,42 @@ void draw_status_kh2() {
     {
         float now = static_cast<float>(st.hp);
         if (lastHp >= 0 && now < lastHp) {
-            if (!hurtSeen || g_frameNo - hurtFrame > 60 || trailHp < lastHp) trailHp = lastHp;
+            if (!hurtSeen || g_frameNo - hurtFrame > 90 || trailHp < lastHp) trailHp = lastHp;
             hurtFrame = g_frameNo;
             hurtSeen = true;
         }
         lastHp = now;
     }
     const unsigned sinceHurt = hurtSeen ? g_frameNo - hurtFrame : 100000;
-    const float trail = sinceHurt < 30 ? 1.0f : (sinceHurt < 60 ? 1.0f - (sinceHurt - 30) / 30.0f : 0.0f);
+    // lost HP: a white flash for 10 frames, held until 60, faded out by 90
+    const float trail = sinceHurt <= 60 ? 1.0f : (sinceHurt < 90 ? 1.0f - (sinceHurt - 60) / 30.0f : 0.0f);
+    const float trailGlow = sinceHurt < 10 ? 2.0f - sinceHurt / 10.0f : 1.0f;
     const bool wince = sinceHurt < 45;
 
     // The frame: a half-clear disc and a thin circle, 37 units out, in the
     // sprites and arrangement KH2 uses for Sora's own (sprite group 117). KH2
     // tints it: black at rest, red fading to black when hit, pulsing red when
     // HP is low.
+    float hpMax = (st.hpMax > 0 ? static_cast<float>(st.hpMax) : 1) * kHpScale;
+    float hp = (st.hp < 0 ? 0 : (st.hp > st.hpMax ? st.hpMax : st.hp)) * kHpScale;
+    const bool low = hp > 0 && hp <= hpMax * 0.25f;
+
     float flush = wince ? 1.0f - sinceHurt / 45.0f : 0.0f;
-    if (st.hp > 0 && st.hp <= st.hpMax / 4) {
-        float t = (g_frameNo % 40) / 20.0f;          // 20 frames each way, as in the data
-        float pulse = t < 1 ? 1 - t : t - 1;
+    float pulse = 0;
+    const float beat = (g_frameNo % 40) / 40.0f;   // low HP runs on a 40 frame loop
+    if (low && full) {
+        pulse = beat < 0.5f ? 1 - beat * 2 : beat * 2 - 1;
         if (pulse > flush) flush = pulse;
+        // a red ring that spins out from the frame and fades as it goes
+        const float grow = 1.7f + (4.0f - 1.7f) * beat;
+        const float wave[4] = {1.56f, 0, 0, 1 - beat};
+        for (int q = 0; q < 4; ++q) {
+            const float qx = (q == 0 || q == 1) ? 17.0f : -17.0f, qy = (q == 1 || q == 2) ? 17.0f : -17.0f;
+            hud_sprite_turned(o, qx * grow, qy * grow, 0, 0, 238, 99, 255, 116, beat * 360, 0, 0, wave);
+        }
     }
     const float tint[4] = {1.56f * flush, 0, 0, 1};
-    for (int sx = -1; sx <= 1; sx += 2)
+    for (int sx = -1; full && sx <= 1; sx += 2)
         for (int sy = -1; sy <= 1; sy += 2) {
             const float disc[4] = {tint[0] * 144 / 255.0f * 2, 0, 0, 0.5f};
             hud_sprite(o, sx * 37.0f, sy * 37.0f, 0, 0, 119, 146, 156, 183, disc);
@@ -939,66 +986,67 @@ void draw_status_kh2() {
 
     // --- HP ---
     // The gauge starts at 9 o'clock and runs clockwise. How far it reaches
-    // depends on max HP: a short arc early on, the full three quarters later,
+    // depends on max HP: a short arc early on, the full three quarters at 60,
     // and past that a bar running left from the bottom of the ring. Current HP
     // fills it from the same start, so damage comes off the far end.
-    const float kDegPerHp = 2.0f;   // about what KH2 shows: 60 HP is a third of the ring
-    const float kUnitsPerDeg = kPi / 180 * kRingMidR;
-    float hpMax = st.hpMax > 0 ? static_cast<float>(st.hpMax) : 1;
-    float hp = st.hp < 0 ? 0 : (st.hp > st.hpMax ? hpMax : static_cast<float>(st.hp));
-    float maxDeg = hpMax * kDegPerHp, curDeg = hp * kDegPerHp;
-    float bar = maxDeg > 270 ? (maxDeg - 270) * kUnitsPerDeg : 0;
-    if (bar > 330) bar = 330;
-    const bool low = hp <= hpMax * 0.25f;
+    auto ring_deg = [](float v) { return (v < kRingHp ? v : kRingHp) * kDegPerHp; };
+    auto bar_len = [](float v) { return v > kRingHp ? (v - kRingHp) * kBarPerHp : 0.0f; };
+    const float maxDeg = ring_deg(hpMax), bar = bar_len(hpMax);
 
-    // The black ring behind the gauge, as far round as max HP reaches. It is
+    // The dark ring behind the gauge, as far round as max HP reaches. It is
     // wider than the coloured band, so it is both the gauge's border and what
-    // shows where HP has been lost. It runs a little past each end to close them.
-    const float kCapDeg = 2.0f / kUnitsPerDeg;
-    {
-        float end = maxDeg < 270 ? maxDeg + kCapDeg : 270;
-        hud_ring(h, kUvDarkU, 180 - kCapDeg, 180 + end, black);
-        if (bar > 0) hud_sprite(h, -bar - 2, kRingR, 0, 0, kUvDarkU, 60, kUvDarkU, kUvCentreV, black);
+    // shows where HP has been lost. At low HP it pulses red with the frame.
+    const float back[4] = {1 + 0.56f * pulse, 1 - pulse, 1 - pulse, 1};
+    if (full) {
+    hud_sprite(h, -45, 0, 0, 2, 189, 49, 234, 52, back);   // closes the start of the ring
+    hud_ring(h, kUvDarkU, 180, 180 + maxDeg, back);
+    if (bar > 0) hud_sprite(h, -bar, kRingR, 0, 0, kUvDarkU, 60, kUvDarkU, kUvCentreV, back);
+
+    // HP just lost: red up to where HP was, under what is left
+    if (trail > 0 && trailHp * kHpScale > hp) {
+        const float was = trailHp * kHpScale > hpMax ? hpMax : trailHp * kHpScale;
+        const float red[4] = {1.0f * trailGlow, 0.0625f * trailGlow, 0.19f * trailGlow, trail};
+        hud_ring(h, kUvRedU, 180, 180 + ring_deg(was), red);
+        if (bar_len(was) > 0) hud_sprite(h, -bar_len(was), kRingR, 0, 0, kUvRedU, 60, kUvRedU, kUvCentreV, red);
     }
 
-    // HP just lost: red, from where HP is now back to where it was
-    if (trail > 0 && trailHp > hp) {
-        const float redCol[4] = {2.6f, 0.30f, 0.25f, trail};
-        float lostDeg = (trailHp > hpMax ? hpMax : trailHp) * kDegPerHp;
-        hud_ring(h, kUvDarkU, 180 + (curDeg < 270 ? curDeg : 270), 180 + (lostDeg < 270 ? lostDeg : 270), redCol);
-        if (lostDeg > 270 && bar > 0) {
-            float from = curDeg > 270 ? (curDeg - 270) * kUnitsPerDeg : 0;
-            float to = (lostDeg - 270) * kUnitsPerDeg;
-            if (to > bar) to = bar;
-            if (to > from) hud_sprite(h, -to, kRingR, -from, 0, kUvDarkU, 60, kUvDarkU, kUvCentreV, redCol);
-        }
+    if (hp > 0) {
+        hud_ring(h, kUvGreenU, 180, 180 + ring_deg(hp), white);
+        if (bar_len(hp) > 0) hud_sprite(h, -bar_len(hp), kRingR, 0, 0, kUvGreenU, 60, kUvGreenU, kUvCentreV, white);
     }
 
-    if (curDeg > 0) {
-        hud_ring(h, kUvGreenU, 180, 180 + (curDeg < 270 ? curDeg : 270), white);
-        if (curDeg > 270 && bar > 0) {
-            float len = (curDeg - 270) * kUnitsPerDeg;
-            if (len > bar) len = bar;
-            hud_sprite(h, -len, kRingR, 0, 0, kUvGreenU, 60, kUvGreenU, kUvCentreV, white);
-        }
+    // the cap on the far end: across the ring where max HP stops, or standing
+    // at the end of the bar once there is one
+    if (bar > 0)
+        hud_sprite_turned(h, -45, 1, 0, -3, 189, 49, 234, 53, 270, -bar, 0, white);
+    else
+        hud_sprite_turned(h, -45, 1, 0, -3, 189, 49, 234, 53, maxDeg, 0, 0, white);
     }
 
-    // --- MP: its tag is placed by the data at (-40, 31) from the frame's
-    // centre, and the bar runs left from the tag with no gap ---
+    // --- MP: the layout data hangs it at (-40, 31) from the frame's centre.
+    // The tag sits there and the bar runs left from it, one unit to an MP,
+    // closed by a cap. While it recharges the bar and tag blink. ---
     const float mpY = 31, mpRight = -40, mpLen = 100;
     float mp = st.mp < 0 ? 0 : (st.mp > 1 ? 1 : st.mp);
-    hud_sprite(o, mpRight - mpLen - 1, mpY - 5, mpRight, mpY + 5, 183, 49, 185, 59, mpWell);
+    if (st.mpBar) {
+    const float blink = st.mpCharging && (g_frameNo % 80) < 40 ? 2.0f : 1.0f;
+    const float charge[4] = {mpCharge[0] * blink, mpCharge[1] * blink, mpCharge[2] * blink, 1};
+    const float tagCh[4] = {mpTagCh[0] * blink, mpTagCh[1] * blink, mpTagCh[2] * blink, 1};
+    const float wellCh[4] = {0.656f, 0.031f, 0.031f, 1};
+    hud_sprite(o, mpRight - mpLen, mpY - 5, mpRight, mpY + 5, 183, 49, 185, 59, st.mpCharging ? wellCh : mpWell);
+    hud_sprite(o, mpRight - mpLen - 3, mpY - 5, mpRight - mpLen, mpY + 5, 154, 37, 157, 47, white);
     if (mp > 0) {
         if (st.mpCharging)
-            hud_sprite(o, mpRight - mpLen * mp, mpY - 3, mpRight, mpY + 3, 219, 40, 219, 46, mpCharge);
+            hud_sprite(o, mpRight - mpLen * mp, mpY - 3, mpRight, mpY + 3, 219, 40, 219, 46, charge);
         else
             hud_sprite(o, mpRight - mpLen * mp, mpY - 3, mpRight, mpY + 3, 216, 40, 216, 46, white);
     }
-    hud_sprite(o, -40, mpY - 5, -16, mpY + 5, 157, 37, 181, 47, st.mpCharging ? mpTagCh : mpTag);
+    hud_sprite(o, -40, mpY - 5, -16, mpY + 5, 157, 37, 181, 47, st.mpCharging ? tagCh : mpTag);
+    }
 
     // --- portrait: KH2's own, placed by its own layout data, over the gauge ---
     g_out = &g_faceVerts;
-    if (g_face) {
+    if (g_face && full) {
         if (hp <= 0) face_sprite(o, -35, -51, 36, 44, 143, 0, 214, 95);        // down
         else if (low || wince) face_sprite(o, -34, -50, 35, 45, 72, 0, 141, 95);   // hurt
         else face_sprite(o, -33, -50, 31, 45, 3, 0, 67, 95);
@@ -1007,6 +1055,7 @@ void draw_status_kh2() {
 }
 
 void draw_status() {
+    if (!g_state.gauge) return;
     if (g_kh2) draw_status_kh2();
     else draw_status_plain();
 }
@@ -1020,7 +1069,7 @@ namespace cmd {
 // (blue) and a battle (red) version; index 0 is field, 1 battle.
 constexpr int kOpen = 7;                     // the whole menu coming up
 constexpr int kHeader[2] = {17, 30};         // COMMANDS
-constexpr int kSlotSel[2] = {10, 23};        // selected slot, glowing
+constexpr int kSlotSel[2] = {9, 22};         // selected slot: settles in from the right, then rests
 constexpr int kSlotMid[2] = {16, 29};        // unselected slot
 constexpr int kSlotLast[2] = {11, 24};       // unselected slot closing the menu
 constexpr int kIconRing[2] = {45, 46};       // glow behind the selected slot's icon
@@ -1028,12 +1077,23 @@ constexpr int kBottom = 6;                   // trim under the last slot, on ski
 constexpr int kIcon[4] = {37, 41, 39, 44};   // keyblade, hat, potion, charm
 // lists, by command: Magic, Items, Summon
 constexpr int kSubHeader[4] = {-1, 60, 51, 73};
-constexpr int kSubSel[4] = {-1, 61, 48, 74};
-constexpr int kSubMid[4] = {-1, 62, 49, 75};
-constexpr int kSubLast[4] = {-1, 63, 50, 76};
+constexpr int kSubSel[4] = {-1, 57, 48, 70};
+constexpr int kSubMid[4] = {-1, 59, 50, 72};
+constexpr int kSubLast[4] = {-1, 58, 49, 71};
+
+// Where KH2's code puts things, on its 512x416 screen. The last slot always
+// sits at y 388 and the menu grows upward from it, 22 to a row, with the
+// header one row above the first slot.
+constexpr float kLeft = 28;                  // menu x; a wide screen adds nothing to it
+constexpr float kLastSlotY = 388;
 constexpr float kRowPitch = 22;
-constexpr float kSelectedShift = 10;         // the selected slot sits this far right
-constexpr float kLabelPad = 13;              // from a slot's left edge to its label
+constexpr float kSelectedShift = 8;          // the selected slot sits this far right
+constexpr float kLevelShift = 16;            // a list sits this far right of the menu under it
+constexpr float kTextX = 10, kTextY = -8;    // label, from the slot's art
+constexpr float kTextSize = 14.0f / 18;      // size 14 in a font drawn at 18
+constexpr float kTextShadow = 2;             // black at half strength, down and right
+constexpr float kGlyphDrop = 1.5f;           // the sheet's glyphs start this far down their cell (measured)
+constexpr int kListRows = 5;                 // rows of a list on screen at once
 }
 
 // ---- KH2's system font ----
@@ -1042,6 +1102,8 @@ constexpr float kLabelPad = 13;              // from a slot's left edge to its l
 // that in the remastered sheet). Glyphs are stored grey and doubled when
 // drawn, like every colour in KH2's 2D data.
 constexpr int kFontCols = 28;
+float g_textAcross = kUnitAcross;   // how much wider than tall text is drawn
+bool g_textShadow = true;           // KH2 drops a shadow under its labels, KH1 does not
 constexpr float kFontCellW = 18, kFontCellH = 24;
 
 // Where a character sits in the grid, or -1 if the font has none.
@@ -1074,40 +1136,41 @@ float kfont_text(float x, float y, float unit, float scale, const char* s, const
     for (; *s; ++s) {
         int g = kfont_glyph(*s);
         if (g < 0 || g >= g_kfontCount) {
-            x += 6 * k;   // space, and anything the font lacks
+            x += 6 * k * g_textAcross;   // space, and anything the font lacks
             continue;
         }
         float u0 = (g % kFontCols) * kFontCellW * 2 / 1024.0f, v0 = (g / kFontCols) * kFontCellH * 2 / 512.0f;
         float u1 = u0 + kFontCellW * 2 / 1024.0f, v1 = v0 + kFontCellH * 2 / 512.0f;
-        float x1 = x + kFontCellW * k, y1 = y + kFontCellH * k;
+        float x1 = x + kFontCellW * k * g_textAcross, y1 = y + kFontCellH * k;
         vert(x, y, u0, v0, c2);
         vert(x1, y, u1, v0, c2);
         vert(x, y1, u0, v1, c2);
         vert(x1, y, u1, v0, c2);
         vert(x1, y1, u1, v1, c2);
         vert(x, y1, u0, v1, c2);
-        x += g_kfontWidth[g] * k;
+        x += g_kfontWidth[g] * k * g_textAcross;
     }
     return x;
 }
 
 // White text with a dark edge, sized in KH2 units.
-void menu_text(float x, float y, float px, const char* s, const float col[4]) {
+// A menu label. x, y are the top left of the text in pixels.
+void menu_text(float x, float y, const char* s, const float col[4]) {
+    const float unit = kh2_unit();
     if (g_kfont) {
-        // px is the height asked for; the font's cell is 24 units tall
-        const float unit = kh2_unit();
-        const float scale = px / unit / 15.5f;
-        const float shadow[4] = {0.02f, 0.02f, 0.03f, 0.85f};
+        const float shadow[4] = {0, 0, 0, 0.5f * col[3]};
+        const float off = cmd::kTextShadow * cmd::kTextSize;
         std::vector<Vertex>* was = g_out;
         g_out = &g_kfontVerts;
-        const float top = y - 4 * unit * scale;   // glyphs sit a little down in their cell
-        kfont_text(x + unit, top + unit, unit, scale, s, shadow);
-        kfont_text(x, top, unit, scale, s, col);
+        if (g_textShadow) kfont_text(x + off * unit * g_textAcross, y + off * unit, unit, cmd::kTextSize, s, shadow);
+        kfont_text(x, y, unit, cmd::kTextSize, s, col);
         g_out = was;
         return;
     }
+    const float px = 12 * unit;
     const float edge[4] = {0.05f, 0.04f, 0.03f, 0.9f};
     const float o = px * 0.07f;
+    y += 2 * unit;
     text(x - o, y, px, s, edge);
     text(x + o, y, px, s, edge);
     text(x, y - o, px, s, edge);
@@ -1152,21 +1215,17 @@ Skin* skin_for_world(int world) {
     return nullptr;
 }
 
-// Left edge of a slot's art, in units from the origin it is drawn at. Skins
-// differ in where their slots start, and the labels follow the slot.
-float group_left(const Seq& seq, int group) {
+// How far right of its origin a slot's art is drawn on a given frame. Skins
+// differ in this, and a newly selected slot slides the last few units in. The
+// label rides along.
+float group_shift(const Seq& seq, int group, int frame) {
     if (group < 0 || group >= static_cast<int>(seq.animGroups.size())) return 0;
     const SeqAnimGroup& ag = seq.animGroups[group];
     if (ag.count == 0) return 0;
     const SeqAnim& a = seq.anims[ag.first];
-    const SeqRange& sg = seq.groups[a.group];
-    float left = 1e9f;
-    for (int p = 0; p < sg.count; ++p) {
-        const SeqPart& part = seq.parts[sg.first + p];
-        float x = part.x0 < part.x1 ? part.x0 : part.x1;
-        if (x < left) left = x;
-    }
-    return a.tx1 + (left < 1e8f ? left : 0);
+    if (frame >= a.frame1 || a.frame1 <= a.frame0) return a.tx1;
+    if (frame <= a.frame0) return a.tx0;
+    return a.tx0 + (a.tx1 - a.tx0) * (frame - a.frame0) / (a.frame1 - a.frame0);
 }
 
 int group_last(const Seq& seq, int group) {
@@ -1177,83 +1236,296 @@ void draw_menu_kh2() {
     static const char* kItems[4] = {"Attack", "Magic", "Items", "Summon"};
     const OverlayState st = g_state;
     const Seq& seq = g_skin->seq;
-    const float u = kh2_unit();
-    const float ox = 37 * u;                                     // measured off KH2 screenshots
-    const float oy = g_h - (3 * cmd::kRowPitch + 15 + 18) * u;
+    const float u = kh2_unit(), ux = kh2_unit_x();
     const int f = static_cast<int>(g_frameNo);
-    const float white[4] = {1, 1, 1, 1};
-    const float dim[4] = {0.72f, 0.72f, 0.74f, 1};
+    const float bright[4] = {0.90f, 0.90f, 0.90f, 1};   // E6E6E6 and B4B4B4 in KH2's tables
+    const float dim[4] = {0.71f, 0.71f, 0.71f, 1};
     const int mode = st.battle ? 1 : 0;
-    const float rowText = ox + (group_left(seq, cmd::kSlotMid[mode]) + cmd::kLabelPad) * u;
 
+    // screen position of a slot: level 0 is the menu, 1 a list over it
+    auto slot_x = [&](int level) { return (cmd::kLeft + cmd::kLevelShift * level) * ux; };
+    auto slot_y = [&](int rows, int i) {
+        return g_h - (416 - (cmd::kLastSlotY - cmd::kRowPitch * (rows - 1 - i))) * u;
+    };
+    auto label = [&](float x, float y, float shift, const char* s, const float col[4]) {
+        menu_text(x + (shift + cmd::kTextX) * ux, y + (cmd::kTextY - cmd::kGlyphDrop) * u, s, col);
+    };
+
+    // a slot settles in over its first frames each time the selection lands on it
+    static int lastMain = -1, lastSub = -1;
+    static unsigned mainFrame = 0, subFrame = 0;
+    if (st.selected != lastMain) lastMain = st.selected, mainFrame = g_frameNo;
+    const int subKey = st.subOpen ? st.subSelected : -1;
+    if (subKey != lastSub) lastSub = subKey, subFrame = g_frameNo;
+
+    const float ox = slot_x(0), oy = slot_y(4, 0);
     g_out = &g_cmdVerts;
-    if (!st.subOpen) {
-        // Coming up: KH2's own opening animation, with the labels fading in
-        // over its last third of a second.
-        const int since = g_testSince >= 0 ? g_testSince : static_cast<int>(g_frameNo - g_menuOpenFrame);
-        const int openLast = group_last(seq, cmd::kOpen);
-        if (since < openLast) {
-            seq_draw(seq, cmd::kOpen, since, ox, oy, u);
-            float fade = (since - (openLast - 20)) / 20.0f;
-            if (fade > 0) {
-                const float c[4] = {dim[0], dim[1], dim[2], fade};
-                g_out = &g_verts;
-                for (int i = 0; i < 4; ++i)
-                    menu_text(rowText, oy + (i * cmd::kRowPitch - 6.5f) * u, 12 * u, kItems[i], c);
-            }
-            g_out = &g_verts;
-            return;
-        }
 
-        // Headers are authored one slot above the menu's origin. Their glow is a
-        // one-shot that plays as the menu comes up, so here it rests on its end.
-        seq_draw(seq, cmd::kHeader[mode], 1 << 20, ox, oy - cmd::kRowPitch * u, u);
-        seq_draw(seq, cmd::kBottom, f, ox, oy, u);
-        for (int i = 0; i < 4; ++i)
-            if (i != st.selected)
-                seq_draw(seq, i == 3 ? cmd::kSlotLast[mode] : cmd::kSlotMid[mode], f, ox, oy + i * cmd::kRowPitch * u, u);
-        // the selected slot is pushed right and is the only one showing its icon
-        const float sx = ox + cmd::kSelectedShift * u;
-        const float sy = oy + st.selected * cmd::kRowPitch * u;
-        seq_draw(seq, cmd::kSlotSel[mode], f, sx, sy, u);
-        seq_draw(seq, cmd::kIconRing[mode], f, sx, sy, u);
-        seq_draw(seq, cmd::kIcon[st.selected], f, sx, sy, u);
-        g_out = &g_verts;
-        for (int i = 0; i < 4; ++i) {
-            bool sel = i == st.selected;
-            menu_text(rowText + (sel ? cmd::kSelectedShift * u : 0), oy + (i * cmd::kRowPitch - 6.5f) * u, 12 * u,
-                      kItems[i], sel ? white : dim);
+    // Coming up: KH2's own opening animation, with the labels fading in over
+    // its last third of a second.
+    const int since = g_testSince >= 0 ? g_testSince : static_cast<int>(g_frameNo - g_menuOpenFrame);
+    const int openLast = group_last(seq, cmd::kOpen);
+    if (!st.subOpen && since < openLast) {
+        seq_draw(seq, cmd::kOpen, since, ox, oy, u);
+        float fade = (since - (openLast - 20)) / 20.0f;
+        if (fade > 0) {
+            const float c[4] = {dim[0], dim[1], dim[2], fade};
+            const float shift = group_shift(seq, cmd::kSlotMid[mode], 1 << 20);
+            for (int i = 0; i < 4; ++i) label(ox, slot_y(4, i), shift, kItems[i], c);
         }
+        g_out = &g_verts;
         return;
     }
 
-    // A list: its own header, then up to four wide slots that scroll with the selection.
+    // A list covers the rows of the menu behind it from its header down.
     const int kind = st.selected >= 1 && st.selected <= 3 ? st.selected : 1;
-    const int kRows = 4;
-    int first = st.subSelected >= kRows ? st.subSelected - kRows + 1 : 0;
-    int shown = st.subCount - first < kRows ? st.subCount - first : kRows;
-    if (shown < 1) shown = 1;
-    seq_draw(seq, cmd::kSubHeader[kind], f, ox, oy - cmd::kRowPitch * u, u);
+    int first = 0, shown = 0;
+    if (st.subOpen) {
+        first = st.subSelected >= cmd::kListRows ? st.subSelected - cmd::kListRows + 1 : 0;
+        shown = st.subCount - first < cmd::kListRows ? st.subCount - first : cmd::kListRows;
+        if (shown < 1) shown = 1;
+    }
+    const float coveredFrom = st.subOpen ? slot_y(shown, -1) - cmd::kRowPitch * u / 2 : 1e9f;
+
+    // Headers are authored one slot above the first. Their glow is a one-shot
+    // that plays as the menu comes up, so here it rests on its end.
+    seq_draw(seq, cmd::kHeader[mode], 1 << 20, ox, slot_y(4, -1), u);
+    seq_draw(seq, cmd::kBottom, f, ox, oy, u);
+    for (int i = 0; i < 4; ++i)
+        if (i != st.selected) seq_draw(seq, i == 3 ? cmd::kSlotLast[mode] : cmd::kSlotMid[mode], f, ox, slot_y(4, i), u);
+    // the selected slot is pushed right and is the only one showing its icon
+    const int selAge = static_cast<int>(g_frameNo - mainFrame);
+    const float sx = ox + cmd::kSelectedShift * ux, sy = slot_y(4, st.selected);
+    const float selShift = group_shift(seq, cmd::kSlotSel[mode], selAge);
+    seq_draw(seq, cmd::kSlotSel[mode], selAge, sx, sy, u);
+    seq_draw(seq, cmd::kIconRing[mode], f, sx + selShift * ux, sy, u);
+    seq_draw(seq, cmd::kIcon[st.selected], f, sx + selShift * ux, sy, u);
+    {
+        const float shift = group_shift(seq, cmd::kSlotMid[mode], 1 << 20);
+        for (int i = 0; i < 4; ++i) {
+            if (slot_y(4, i) >= coveredFrom) continue;
+            if (i == st.selected) label(sx, sy, selShift, kItems[i], bright);
+            else label(ox, slot_y(4, i), shift, kItems[i], dim);
+        }
+    }
+    if (!st.subOpen) {
+        g_out = &g_verts;
+        return;
+    }
+
+    // The list: its own header, then its slots, bottom-aligned with the menu
+    // and one step to the right of it.
+    const float lx = slot_x(1);
+    const int subAge = static_cast<int>(g_frameNo - subFrame);
+    seq_draw(seq, cmd::kSubHeader[kind], f, lx, slot_y(shown, -1), u);
     for (int i = 0; i < shown; ++i) {
-        bool sel = first + i == st.subSelected && st.subCount > 0;
-        const int slot = sel ? cmd::kSubSel[kind] : (i == shown - 1 ? cmd::kSubLast[kind] : cmd::kSubMid[kind]);
-        seq_draw(seq, slot, f, ox, oy + i * cmd::kRowPitch * u, u);
+        const bool sel = first + i == st.subSelected && st.subCount > 0;
+        const float y = slot_y(shown, i);
+        const int group = sel ? cmd::kSubSel[kind] : (i == shown - 1 ? cmd::kSubLast[kind] : cmd::kSubMid[kind]);
+        const float x = lx + (sel ? cmd::kSelectedShift * ux : 0);
+        seq_draw(seq, group, sel ? subAge : f, x, y, u);
+        const char* name = st.subCount == 0 ? "Nothing" : (st.subNames[first + i] ? st.subNames[first + i] : "?");
+        label(x, y, group_shift(seq, group, sel ? subAge : 1 << 20), name, sel ? bright : dim);
     }
     g_out = &g_verts;
-    const float listText = ox + (group_left(seq, cmd::kSubMid[kind]) + cmd::kLabelPad) * u;
-    if (st.subCount == 0) {
-        menu_text(listText, oy - 6.5f * u, 12 * u, "Nothing", dim);
-        return;
+}
+
+// ---- KH1's command menu ----
+//
+// What the combat mod shows on its own. KH1 has no layout data to follow: its
+// menu is a handful of grey pieces on one sheet (command2/uitex.bin), which
+// the game tints and stacks. Sizes come from the sheet, half a KH1 screen
+// unit to the texel; where the pieces go is measured off the game.
+namespace kh1 {
+struct Rect { int x0, y0, x1, y1; };
+constexpr float kSheetW = 256, kSheetH = 640;   // the pieces, with the words and icons sheet under them
+constexpr int kWords = 384;                      // where that second sheet starts
+constexpr Rect kHeader = {4, 4, 252, 44};
+constexpr Rect kSlot = {4, 48, 252, 92};
+constexpr Rect kSlotLast = {4, 96, 252, 140};
+constexpr Rect kGlowTop = {7, 151, 233, 166};    // the selected slot's inside, upper and lower half
+constexpr Rect kGlowBottom = {4, 170, 234, 196};
+constexpr Rect kSelected = {4, 200, 250, 248};   // the selected slot's outline
+constexpr Rect kContextTop = {8, 253, 226, 265};   // the same three for the context command's bar
+constexpr Rect kContextBottom = {8, 270, 233, 296};
+constexpr Rect kContext = {6, 300, 248, 348};
+constexpr Rect kIconTriangle = {185, kWords + 219, 217, kWords + 253};
+constexpr Rect kWordCommand = {4, kWords + 2, 156, kWords + 25};
+constexpr Rect kWordItem = {158, kWords + 2, 238, kWords + 25};
+constexpr Rect kWordMagic = {3, kWords + 26, 105, kWords + 48};
+constexpr Rect kWordSummon = {106, kWords + 26, 237, kWords + 48};
+constexpr Rect kIconKey = {9, kWords + 219, 31, kWords + 253};
+constexpr Rect kIconHat = {39, kWords + 220, 71, kWords + 251};
+constexpr Rect kIconPotion = {79, kWords + 219, 105, kWords + 253};
+constexpr Rect kIconStar = {207, kWords + 133, 241, kWords + 163};
+
+// One menu's colours: its frame, the word in its header, and the selected
+// slot's outline and two-tone inside.
+struct Look { float frame[3], word[3], edge[3], top[3], bottom[3]; };
+constexpr Look kField  = {{0.14f, 0.33f, 0.74f}, {0.50f, 0.74f, 1.00f}, {0.22f, 0.52f, 1.00f}, {0.00f, 0.01f, 0.05f}, {0.05f, 0.14f, 0.50f}};
+constexpr Look kBattle = {{0.52f, 0.17f, 0.19f}, {0.96f, 0.42f, 0.42f}, {0.88f, 0.38f, 0.33f}, {0.04f, 0.00f, 0.00f}, {0.46f, 0.07f, 0.07f}};
+constexpr Look kMagic  = {{0.32f, 0.27f, 0.60f}, {0.74f, 0.68f, 1.00f}, {0.52f, 0.46f, 0.90f}, {0.01f, 0.01f, 0.05f}, {0.20f, 0.16f, 0.50f}};
+constexpr Look kItems  = {{0.18f, 0.50f, 0.27f}, {0.30f, 1.00f, 0.42f}, {0.34f, 0.82f, 0.45f}, {0.00f, 0.03f, 0.01f}, {0.06f, 0.36f, 0.12f}};
+constexpr Look kSummon = {{0.70f, 0.41f, 0.10f}, {1.00f, 0.66f, 0.20f}, {0.96f, 0.60f, 0.15f}, {0.04f, 0.02f, 0.00f}, {0.48f, 0.23f, 0.02f}};
+
+constexpr float kRow = 22, kHeaderH = 20;   // KH1 screen units (512x448)
+constexpr float kLeft = 16, kBottom = 18;   // the menu's corner, from the picture's bottom left
+constexpr float kSelectedShift = 12;        // the selected slot sits this far right, and its label a little more
+constexpr float kLabelX = 17, kSelectedLabelX = 18;
+constexpr float kContextW = 156, kContextH = 24;   // the context bar is drawn wider than its art
+constexpr Look kContextLook = {{0, 0, 0}, {0.35f, 0.80f, 0.55f}, {0.36f, 0.86f, 0.42f}, {0.00f, 0.03f, 0.01f}, {0.05f, 0.30f, 0.10f}};
+constexpr float kListShift = 12;            // and a list this far right of the menu under it
+constexpr int kListRows = 7;
+}
+
+// A piece of the sheet with its top left at x, y (pixels), tinted.
+void kh1_piece(float x, float y, float unit, const kh1::Rect& r, const float tint[3], float alpha = 1) {
+    // the pieces are mid grey, so twice the tint gives the colour asked for
+    const float c[4] = {tint[0] * 2, tint[1] * 2, tint[2] * 2, alpha};
+    const float x1 = x + (r.x1 - r.x0) * 0.5f * unit, y1 = y + (r.y1 - r.y0) * 0.5f * unit;
+    const float u0 = r.x0 / kh1::kSheetW, u1 = r.x1 / kh1::kSheetW;
+    const float v0 = r.y0 / kh1::kSheetH, v1 = r.y1 / kh1::kSheetH;
+    vert(x, y, u0, v0, c);
+    vert(x1, y, u1, v0, c);
+    vert(x, y1, u0, v1, c);
+    vert(x1, y, u1, v0, c);
+    vert(x1, y1, u1, v1, c);
+    vert(x, y1, u0, v1, c);
+}
+
+// A piece stretched over a rectangle (pixels) and shaded from one colour at
+// its top to another at its bottom.
+void kh1_shaded(float x0, float y0, float x1, float y1, const kh1::Rect& r, const float top[3], const float bottom[3]) {
+    const float ct[4] = {top[0] * 2, top[1] * 2, top[2] * 2, 1}, cb[4] = {bottom[0] * 2, bottom[1] * 2, bottom[2] * 2, 1};
+    const float u0 = r.x0 / kh1::kSheetW, u1 = r.x1 / kh1::kSheetW;
+    const float v0 = r.y0 / kh1::kSheetH, v1 = r.y1 / kh1::kSheetH;
+    vert(x0, y0, u0, v0, ct);
+    vert(x1, y0, u1, v0, ct);
+    vert(x0, y1, u0, v1, cb);
+    vert(x1, y0, u1, v0, ct);
+    vert(x1, y1, u1, v1, cb);
+    vert(x0, y1, u0, v1, cb);
+}
+
+// Header and slots of one menu, standing on the shared bottom line. The row
+// at `selected` gets the lit slot and the icon. Labels at or below `coveredFrom`
+// are left out, for a menu with a list over it.
+void kh1_menu(float x, int rows, int selected, const kh1::Look& look, const kh1::Rect& word, const char* const* names,
+              const kh1::Rect& icon, const float iconTint[3], float coveredFrom) {
+    const float u = g_h / 448.0f;
+    const float top = g_h - (kh1::kBottom + rows * kh1::kRow + kh1::kHeaderH) * u;
+    const float bright[4] = {0.96f, 0.96f, 0.96f, 1}, plain[4] = {0.84f, 0.84f, 0.84f, 1};
+    g_out = &g_cmdVerts;
+    kh1_piece(x, top, u, kh1::kHeader, look.frame);
+    kh1_piece(x + 6 * u, top + 4.25f * u, u, word, look.word);
+    for (int i = 0; i < rows; ++i) {
+        // the selected row has no slot of its own: the lit one stands in the gap
+        if (i == selected) continue;
+        const float y = top + (kh1::kHeaderH + i * kh1::kRow) * u;
+        kh1_piece(x, y, u, i == rows - 1 ? kh1::kSlotLast : kh1::kSlot, look.frame);
     }
-    for (int i = 0; i < shown; ++i) {
-        const char* label = st.subNames[first + i] ? st.subNames[first + i] : "?";
-        menu_text(listText, oy + (i * cmd::kRowPitch - 6.5f) * u, 12 * u, label,
-                  first + i == st.subSelected ? white : dim);
+    for (int i = 0; i < rows; ++i) {
+        const float y = top + (kh1::kHeaderH + i * kh1::kRow) * u;
+        if (i == selected) {
+            // the lit slot is a little taller than a row and sticks out to the right
+            const float sx = x + kh1::kSelectedShift * u, sy = y - u;
+            g_out = &g_cmdVerts;
+            kh1_piece(sx, sy, u, kh1::kSelected, look.edge);
+            // Its inside is the same shape a little smaller, in two halves on
+            // the sheet, near black at the top and running to the menu's
+            // colour at the bottom. What shows of the outline is a thin rim.
+            const float rim = 1.5f * u;
+            const float ix0 = sx + rim, ix1 = sx + (kh1::kSelected.x1 - kh1::kSelected.x0) * 0.5f * u - rim;
+            const float iy0 = sy + rim, iy1 = sy + (kh1::kSelected.y1 - kh1::kSelected.y0) * 0.5f * u - rim;
+            const float topH = static_cast<float>(kh1::kGlowTop.y1 - kh1::kGlowTop.y0);
+            const float split = topH / (topH + (kh1::kGlowBottom.y1 - kh1::kGlowBottom.y0));
+            const float iym = iy0 + (iy1 - iy0) * split;
+            const float mid[3] = {look.top[0] + (look.bottom[0] - look.top[0]) * split,
+                                  look.top[1] + (look.bottom[1] - look.top[1]) * split,
+                                  look.top[2] + (look.bottom[2] - look.top[2]) * split};
+            // the upper half's slanted corner starts a little in from the lower half's edge
+            const float lean = (kh1::kGlowTop.x0 - kh1::kGlowBottom.x0) * 0.5f * u;
+            kh1_shaded(ix0 + lean, iy0, ix1, iym, kh1::kGlowTop, look.top, mid);
+            kh1_shaded(ix0, iym - 1, ix1, iy1, kh1::kGlowBottom, mid, look.bottom);   // a pixel of overlap hides the join
+            const float iw = (icon.x1 - icon.x0) * 0.5f, ih = (icon.y1 - icon.y0) * 0.5f;
+            kh1_piece(sx + (107 - iw / 2) * u, sy + (12 - ih / 2) * u, u, icon, iconTint);
+            if (y < coveredFrom) menu_text(sx + kh1::kSelectedLabelX * u, y - 1.25f * u, names[i], bright);
+        } else if (y < coveredFrom) {
+            menu_text(x + kh1::kLabelX * u, y - 1.25f * u, names[i], plain);
+        }
     }
 }
 
+void draw_menu_kh1() {
+    static const char* kItems[4] = {"Attack", "Magic", "Items", "Summon"};
+    static const kh1::Rect kIcons[4] = {kh1::kIconKey, kh1::kIconHat, kh1::kIconPotion, kh1::kIconStar};
+    static const float kIconTints[4][3] = {
+        {0.95f, 0.36f, 0.36f}, {0.72f, 0.62f, 1.00f}, {0.30f, 0.86f, 0.42f}, {1.00f, 0.66f, 0.20f}};
+    const OverlayState st = g_state;
+    const float u = g_h / 448.0f;
+    const float was = g_textAcross;
+    g_textAcross = 1;   // KH1's HD screen is square, unlike KH2's
+    g_textShadow = false;
+
+    int first = 0, shown = 0;
+    float coveredFrom = 1e9f;
+    if (st.subOpen) {
+        first = st.subSelected >= kh1::kListRows ? st.subSelected - kh1::kListRows + 1 : 0;
+        shown = st.subCount - first < kh1::kListRows ? st.subCount - first : kh1::kListRows;
+        if (shown < 1) shown = 1;
+        coveredFrom = g_h - (kh1::kBottom + shown * kh1::kRow + kh1::kHeaderH + kh1::kRow / 2) * u;
+    }
+    const float x = kh1::kLeft * u;
+    const int sel = st.selected >= 0 && st.selected < 4 ? st.selected : 0;
+    kh1_menu(x, 4, st.subOpen ? -1 : sel, st.battle ? kh1::kBattle : kh1::kField, kh1::kWordCommand, kItems, kIcons[sel],
+             kIconTints[sel], coveredFrom);
+    if (st.subOpen) {
+        const kh1::Look& look = sel == 2 ? kh1::kItems : (sel == 3 ? kh1::kSummon : kh1::kMagic);
+        const kh1::Rect& word = sel == 2 ? kh1::kWordItem : (sel == 3 ? kh1::kWordSummon : kh1::kWordMagic);
+        const char* names[kh1::kListRows];
+        for (int i = 0; i < shown; ++i)
+            names[i] = st.subCount == 0 ? "Nothing" : (st.subNames[first + i] ? st.subNames[first + i] : "?");
+        kh1_menu(x + kh1::kListShift * u, shown, st.subCount > 0 ? st.subSelected - first : -1, look, word, names,
+                 kIcons[sel], kIconTints[sel], 1e9f);
+    }
+    // The context command lies over the header, wider than the menu and
+    // pointing right. Not while a list is open.
+    if (st.context && !st.subOpen) {
+        const kh1::Look& look = kh1::kContextLook;
+        const float bx = x - 10 * u, bw = kh1::kContextW * u, bh = kh1::kContextH * u;
+        const float by = g_h - (kh1::kBottom + 4 * kh1::kRow + kh1::kHeaderH + 3) * u;
+        const float rim = 1.5f * u;
+        g_out = &g_cmdVerts;
+        kh1_shaded(bx, by, bx + bw, by + bh, kh1::kContext, look.edge, look.edge);
+        const float topH = static_cast<float>(kh1::kContextTop.y1 - kh1::kContextTop.y0);
+        const float split = topH / (topH + (kh1::kContextBottom.y1 - kh1::kContextBottom.y0));
+        const float iy0 = by + rim, iy1 = by + bh - rim, iym = iy0 + (iy1 - iy0) * split;
+        const float mid[3] = {look.top[0] + (look.bottom[0] - look.top[0]) * split,
+                              look.top[1] + (look.bottom[1] - look.top[1]) * split,
+                              look.top[2] + (look.bottom[2] - look.top[2]) * split};
+        // the inside stops short of the point, as on the sheet
+        const float ix1 = bx + bw - rim - 7 * u;
+        kh1_shaded(bx + rim, iy0, ix1 - 3 * u, iym, kh1::kContextTop, look.top, mid);
+        kh1_shaded(bx + rim, iym - 1, ix1, iy1, kh1::kContextBottom, mid, look.bottom);
+        kh1_piece(bx + 12 * u, by + 3.5f * u, u, kh1::kIconTriangle, look.word);
+        const float white[4] = {0.96f, 0.96f, 0.96f, 1};
+        menu_text(bx + 38 * u, by - 0.25f * u, st.context, white);
+    }
+    g_textAcross = was;
+    g_textShadow = true;
+    g_out = &g_verts;
+}
+
 void draw_menu() {
-    g_skin = skin_for_world(g_state.world);
+    if (!g_state.menu) return;
+    // On its own the combat mod shows KH1's menu; the KH2 HUD mod brings KH2's.
+    if (!g_state.kh2Hud && g_kh1) {
+        g_cmd = g_kh1;
+        draw_menu_kh1();
+        return;
+    }
+    // KH2's standard menu on its own; with the KH2 HUD mod, the world's
+    g_skin = skin_for_world(g_state.kh2Hud ? g_state.world : -1);
     g_cmd = g_skin ? g_skin->tex : nullptr;
     if (g_skin) draw_menu_kh2();
     else draw_menu_plain();
@@ -1504,14 +1776,41 @@ void on_present(IDXGISwapChain* sc, UINT flags) {
     }
 }
 
+// More than one mod built on this file can be loaded at once. Only the first
+// hooks the swap chain; the rest sign up here and are called from its hooks.
+// The list lives in shared memory named after the process, so separate dlls
+// find the same one.
+struct OverlayHooks {
+    static constexpr int kMax = 8;
+    void (*present[kMax])(IDXGISwapChain*, UINT flags);
+    void (*resize[kMax])(IDXGISwapChain*);
+};
+OverlayHooks* g_hooks = nullptr;
+
+// Opens the list, making it if this is the first overlay in the process.
+bool open_hooks(bool* first) {
+    char name[64];
+    sprintf_s(name, "Local\\recom_overlay_%lu", GetCurrentProcessId());
+    HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(OverlayHooks), name);
+    if (!h) return false;
+    *first = GetLastError() != ERROR_ALREADY_EXISTS;
+    g_hooks = static_cast<OverlayHooks*>(MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(OverlayHooks)));
+    return g_hooks != nullptr;
+}
+
+void all_present(IDXGISwapChain* sc, UINT flags) {
+    for (auto fn : g_hooks->present)
+        if (fn) fn(sc, flags);
+}
+
 HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain* sc, UINT sync, UINT flags) {
-    on_present(sc, flags);
+    all_present(sc, flags);
     return g_realPresent(sc, sync, flags);
 }
 
 HRESULT STDMETHODCALLTYPE present1_hook(IDXGISwapChain1* sc, UINT sync, UINT flags,
                                         const DXGI_PRESENT_PARAMETERS* params) {
-    on_present(sc, flags);
+    all_present(sc, flags);
     return g_realPresent1(sc, sync, flags, params);
 }
 
@@ -1532,14 +1831,19 @@ void before_resize(IDXGISwapChain* sc) {
     }
 }
 
+void all_resize(IDXGISwapChain* sc) {
+    for (auto fn : g_hooks->resize)
+        if (fn) fn(sc);
+}
+
 HRESULT STDMETHODCALLTYPE resize_hook(IDXGISwapChain* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
-    before_resize(sc);
+    all_resize(sc);
     return g_realResize(sc, count, w, h, fmt, flags);
 }
 
 HRESULT STDMETHODCALLTYPE resize1_hook(IDXGISwapChain3* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags,
                                        const UINT* masks, IUnknown* const* queues) {
-    before_resize(sc);
+    all_resize(sc);
     return g_realResize1(sc, count, w, h, fmt, flags, masks, queues);
 }
 
@@ -1568,6 +1872,22 @@ bool overlay_draw_now(IDXGISwapChain* sc, void (*log)(const char* fmt, ...)) {
 // swaps the pointers in the vtable every swap chain of that class shares.
 bool overlay_install(void (*log)(const char* fmt, ...)) {
     g_log = log;
+    bool first = false;
+    if (!open_hooks(&first)) {
+        if (log) log("overlay: could not share the hook list");
+        return false;
+    }
+    for (int i = 0; i < OverlayHooks::kMax; ++i) {
+        if (g_hooks->present[i]) continue;
+        g_hooks->resize[i] = &before_resize;
+        g_hooks->present[i] = &on_present;
+        break;
+    }
+    if (!first) {
+        if (log) log("overlay: another mod has the swap chain hooked, drawing from its hooks");
+        return true;
+    }
+    if (log) log("overlay: making the probe swap chain");
     HWND wnd = CreateWindowExA(0, "STATIC", "", WS_OVERLAPPED, 0, 0, 8, 8, nullptr, nullptr, nullptr, nullptr);
     if (!wnd) return false;
 
@@ -1591,6 +1911,7 @@ bool overlay_install(void (*log)(const char* fmt, ...)) {
     }
 
     // Present is slot 8 of IDXGISwapChain, Present1 slot 22 of IDXGISwapChain1.
+    if (log) log("overlay: probe made, patching");
     void** vtbl = *reinterpret_cast<void***>(sc);
     g_realPresent = reinterpret_cast<PresentFn>(vtbl[8]);
     bool ok = patch_slot(&vtbl[8], reinterpret_cast<void*>(&present_hook));

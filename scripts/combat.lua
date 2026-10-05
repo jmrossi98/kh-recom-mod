@@ -1,6 +1,6 @@
-LUAGUI_NAME = "recom battle"
+LUAGUI_NAME = "recom combat"
 LUAGUI_AUTH = "jake"
-LUAGUI_DESC = "Battle tweaks: instant reload, reload cost never grows"
+LUAGUI_DESC = "Card combat replaced with a command menu"
 
 -- Steam build only. All addresses are relative to the exe base.
 local PLAYER_PTR  = 0x87B390   -- -> player battle object (only valid in battle)

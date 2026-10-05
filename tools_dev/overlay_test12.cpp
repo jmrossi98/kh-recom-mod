@@ -3,6 +3,7 @@
 // so the D3D11On12 path can be exercised without starting the game.
 //
 //   overlay_test12.exe out.bmp [width height] [selected] [sub]
+#include <cstring>
 #include "../src/overlay.h"
 
 #include <windows.h>
@@ -115,8 +116,23 @@ int main(int argc, char** argv) {
     if (selected < 0) selected = 0;
     overlay_state().selected = selected;
     overlay_state().mp = 0.62f;
+    // OVERLAY_MODS: "combat" or "hud" to draw as if only that mod were installed
+    const char* mods = getenv("OVERLAY_MODS");
+    overlay_state().menu = !mods || !strcmp(mods, "combat");
+    overlay_state().gauge = !mods || !strcmp(mods, "hud");
+    overlay_state().kh2Hud = overlay_state().gauge;
+    overlay_state().mpBar = !mods;
+    overlay_state().context = getenv("OVERLAY_CONTEXT");   // e.g. Examine
     overlay_state().hp = 54;
     overlay_state().hpMax = 80;
+    // OVERLAY_HP and OVERLAY_HPMAX set the gauge, OVERLAY_MP the MP bar (0-100,
+    // negative to show it recharging)
+    if (const char* v = getenv("OVERLAY_HP")) overlay_state().hp = atoi(v);
+    if (const char* v = getenv("OVERLAY_HPMAX")) overlay_state().hpMax = atoi(v);
+    if (const char* v = getenv("OVERLAY_MP")) {
+        overlay_state().mp = abs(atoi(v)) / 100.0f;
+        overlay_state().mpCharging = atoi(v) < 0;
+    }
     // OVERLAY_WORLD picks the menu skin, OVERLAY_FRAMES how many frames to run
     // before the one that is saved (the menu's opening takes a couple of seconds)
     if (const char* wv = getenv("OVERLAY_WORLD")) overlay_state().world = atoi(wv);

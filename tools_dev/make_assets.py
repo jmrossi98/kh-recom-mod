@@ -1,7 +1,7 @@
 """Builds the HUD art the overlay loads at runtime from your own extracted game
 files, so no game art has to live in the repo.
 
-    python make_assets.py <extracted recom folder> <output folder> [<extracted kh2 folder>]
+    python make_assets.py <extracted recom> <output folder> [<extracted kh2> [<openkh Apps> [<extracted kh1>]]]
 
 Writes face.rgba: 256x256 RGBA, Sora's head cut out of the player gauge
 texture, hair included.
@@ -18,6 +18,9 @@ With a KH2 folder it also writes, from field2d/us:
 The .seq needs OpenKH's command line tools to unpack the .2dd: pass the folder
 holding OpenKh.Command.Bar.exe and OpenKh.Command.Layout.exe as a fourth
 argument. Without the KH2 files the overlay draws plain shapes instead.
+
+A fifth argument, an extracted KH1 folder, adds kh1_command.rgba: KH1's
+command menu pieces, header words and icons (command2/uitex.bin).
 """
 import os
 import struct
@@ -182,6 +185,20 @@ def main():
             with open(os.path.join(out, "kh2_font.bin"), "wb") as f:
                 f.write(widths)
             print("wrote", os.path.join(out, "kh2_font.bin"), len(widths), "glyphs")
+
+    if len(sys.argv) > 5:
+        # KH1's command menu: the grey pieces the game tints and stacks, with
+        # the sheet of header words and icons under them
+        ui = os.path.join(sys.argv[5], "remastered", "command2", "uitex.bin")
+        pieces = Image.open(os.path.join(ui, "-4140.dds")).convert("RGBA")
+        words = Image.open(os.path.join(ui, "-20c0.dds")).convert("RGBA")
+        assert pieces.size == (256, 384) and words.size == (256, 256), (pieces.size, words.size)
+        sheet = Image.new("RGBA", (256, 640))
+        sheet.paste(pieces, (0, 0))
+        sheet.paste(words, (0, 384))
+        with open(os.path.join(out, "kh1_command.rgba"), "wb") as f:
+            f.write(sheet.tobytes())
+        print("wrote", os.path.join(out, "kh1_command.rgba"))
 
 
 if __name__ == "__main__":

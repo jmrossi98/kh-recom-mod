@@ -1,35 +1,42 @@
 # kh-recom-mod
 
-Replaces the card combat in Kingdom Hearts Re:Chain of Memories with something
-closer to Kingdom Hearts II. PC, Steam release of HD 1.5+2.5 ReMIX only.
+Replaces the card combat in Kingdom Hearts Re:Chain of Memories with command
+menu combat in the style of the first Kingdom Hearts. PC, Steam release of
+HD 1.5+2.5 ReMIX only.
 
 Very much a work in progress.
 
+The game's own portrait and HP gauge are left alone. For KH2's gauge and
+portrait, and a menu skin for each world, there is a second mod that goes on
+top of this one or works by itself:
+[kh-recom-kh2-hud](https://github.com/jmrossi98/kh-recom-kh2-hud).
+
 ## What works
 
-- KH2 command menu, drawn from KH2's own sheets, layout data and font, with
-  its opening animation: Attack, Magic, Items, Summon. The skin follows the
-  world: KH2's own for the worlds the two games share, its standard menu for
-  the rest (KH2 has no Traverse Town, Wonderland, Monstro or Neverland).
-  The whole menu turns red in battle and blue outside it, as in KH2. Up/down (D-pad
-  or arrow keys) move the cursor, the game's confirm button acts, B / Backspace
-  / left backs out of a list. Shown outside battle too, where it is only for looks
-- KH2 status gauges bottom right: Sora's portrait frame and KH2's portrait of
-  him in his KH1 clothes, the HP ring growing clockwise with max HP on its
-  black backing ring, and the MP bar. Lost HP shows red and fades, the
-  portrait winces and the frame flushes red when hit and pulses at low HP
+- KH1's command menu, built from KH1's own menu pieces, header words and
+  icons: Attack, Magic, Items, Summon. Blue outside battle and red in it, the
+  selected slot lit and set to the right, lists in their own colours opening
+  over the menu. Up/down (D-pad or arrow keys) move the cursor, the game's
+  confirm button acts, B / Backspace / left backs out of a list. Shown outside
+  battle too, where it is only for looks. Labels are in KH2's font for now
+- With the KH2 HUD mod installed the menu is KH2's instead, laid out from
+  KH2's own data and skinned for the world
 - Attack always swings a Kingdom Key 9 and never uses a card up
 - Magic, Items and Summon open a list built from what is in the deck. Nothing
   leaves the deck when used
-- MP: spells cost MP, Cure takes all of it, and at zero it recharges with magic
-  locked until it is full
+- Magic is free. With the KH2 HUD mod installed there is MP: spells cost MP,
+  Cure takes all of it, and at zero it recharges with magic locked until it
+  is full
 - No card breaks: the two sides' cards never interact
-- The game's own HUD is hidden: deck, played cards on both sides, portrait,
-  map card panel. F6 brings most of it back
+- The card HUD is hidden: the deck and the cards played by both sides. F6
+  brings it back
 - The deck can no longer be scrolled or switched by the player
 
 ## Not done yet
 
+- Combat itself is not KH1's yet: Sora's combos, timing and the enemies are
+  still the card game's underneath
+- The context command (Examine and the like) is drawn but nothing sets it yet
 - Enemies still play cards (you just can't see them)
 - Party members: F5 / F7 call Donald / Goofy without a friend card as a test,
   nothing automatic yet
@@ -39,19 +46,20 @@ Very much a work in progress.
 ## Art
 
 No game art is in this repo. `tools_dev/make_assets.py` builds what the overlay
-needs from your own extracted copies of Re:CoM and KH2 (both are in HD
+needs from your own extracted copies of Re:CoM, KH2 and KH1 (all in HD
 1.5+2.5 ReMIX) into `build/assets`. Without those files the overlay falls
 back to plain shapes.
 
-    python tools_dev/make_assets.py <extracted recom> build/assets <extracted kh2> <openkh Apps folder>
+    python tools_dev/make_assets.py <extracted recom> build/assets <extracted kh2> <openkh Apps folder> <extracted kh1>
 
 ## Layout
 
-- `scripts/battle.lua` - LuaBackend script. Does the simple memory tweaks and
+- `scripts/combat.lua` - LuaBackend script. Does the simple memory tweaks and
   loads the dll.
 - `src/combat.cpp` - native side, hooks the game's play-card call and the card
   battle update.
-- `src/overlay.cpp` - draws the command menu over the game. The game presents
+- `src/overlay.cpp` - draws the command menu and MP over the game. Shared with
+  the KH2 HUD mod, which draws the rest of what is in it. The game presents
   from a D3D12 swap chain, so this hooks Present and draws through D3D11On12.
 - `tools_dev/` - `make_assets.py` (see Art), two test programs that render the
   overlay to a BMP without the game (D3D11 and D3D12 swap chains, build with
@@ -74,7 +82,7 @@ locked while it runs.
    game folder.
 2. In `LuaBackend.toml`, point the `[recom]` scripts at this repo's `scripts`
    folder and use the Steam `game_docs` line.
-3. Fix `DLL_PATH` at the top of `scripts/battle.lua` if the repo is not in the
+3. Fix `DLL_PATH` at the top of `scripts/combat.lua` if the repo is not in the
    same place as mine.
 
 F2 in game opens the LuaBackend console, F1 reloads the script.
@@ -83,3 +91,8 @@ F2 in game opens the LuaBackend console, F1 reloads the script.
 
 All addresses are for the Steam build. The script checks a few code bytes on
 startup and turns itself off if they do not match.
+
+For the first three minutes after launch the dll watches for the game hanging:
+if no frame comes for 20 seconds it writes how far it got to
+`build/recom_combat.dll.log` and ends the game, since a hang in exclusive
+fullscreen otherwise takes the desktop with it.

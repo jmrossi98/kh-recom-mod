@@ -17,3 +17,6 @@ __pycache__/
 
 .vscode/
 /re/watch.log
+/re/kh2.exe
+/re/ghidra_kh2/
+/re/decomp_kh2/

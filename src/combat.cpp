@@ -1,4 +1,4 @@
-// Native side of the Re:CoM combat mod. Loaded from battle.lua with
+// Native side of the Re:CoM combat mod. Loaded from combat.lua with
 // package.loadlib and driven once per game frame through rc_frame().
 // Steam build only: every address below is an RVA into the game exe.
 #include "overlay.h"
@@ -43,8 +43,8 @@ constexpr uint32_t kFlagHidePlayerGauge = 0x01;   // portrait and HP ring, top l
 constexpr uint32_t kFlagHidePlayerCards = 0x02;   // the deck in the corner
 constexpr uint32_t kFlagHidePlayerAll   = 0x20;   // every player card, the one in play too
 constexpr uint32_t kFlagHideEnemyAll    = 0x40;   // same for the enemy side
-constexpr uint32_t kFlagHideHud =
-    kFlagHidePlayerGauge | kFlagHidePlayerCards | kFlagHidePlayerAll | kFlagHideEnemyAll;
+constexpr uint32_t kFlagHideCards = kFlagHidePlayerCards | kFlagHidePlayerAll | kFlagHideEnemyAll;
+constexpr uint32_t kFlagHideHud = kFlagHidePlayerGauge | kFlagHideCards;
 
 constexpr uint32_t kObjBattle = 0x16;
 
@@ -147,13 +147,41 @@ using SetFlagsFn    = void (*)(int32_t group, int32_t id, uint32_t value);
 static uintptr_t g_base = 0;
 static Menu g_menu;
 
-// MP. Re:CoM has none, so it lives here. Spells cost MP; when it runs out the
-// gauge refills on its own and magic is locked until it is full again.
+// MP. Re:CoM has none, so it lives here, and only counts while the KH2 HUD
+// mod is running to show it. Spells cost MP; when it runs out the gauge
+// refills on its own and magic is locked until it is full again.
 constexpr float kMpMax = 100.0f;
 constexpr float kMpChargeSeconds = 20.0f;
 static float g_mp = kMpMax;
 static bool g_mpCharging = false;
 static bool g_hideCards = true;
+
+// What the combat mod and the KH2 HUD mod tell each other, in a small named
+// block of shared memory the HUD mod creates. Each stamps its tick every frame
+// so the other knows it is there. MP belongs to the pair: the combat mod only
+// charges for magic while the HUD mod is up to show the bar.
+struct SharedHud {
+    ULONGLONG hudTick;
+    ULONGLONG combatTick;
+    float mp;          // 0..1
+    LONG mpCharging;
+};
+constexpr char kSharedName[] = "Local\\recom_kh2_hud";
+
+static volatile SharedHud* shared_hud() {
+    static volatile SharedHud* block = nullptr;
+    static unsigned tries = 0;
+    if (!block && tries++ % 120 == 0) {
+        if (HANDLE h = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, kSharedName))
+            block = static_cast<SharedHud*>(MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(SharedHud)));
+    }
+    return block;
+}
+
+static bool kh2_hud_running() {
+    volatile SharedHud* b = shared_hud();
+    return b && GetTickCount64() - b->hudTick < 500;
+}
 static bool g_hideKeyDown = false;
 static WORD g_padPrev = 0;
 static bool g_keyPrev[4] = {};
@@ -307,7 +335,8 @@ static uint64_t play_card_hook(void* battle, uint32_t handle, int32_t side, void
         copy = g_menu.subCards[g_menu.subSel];
     }
 
-    float cost = (copy.type >> 4) == kTypeMagic ? spell_cost(copy.id) : 0;
+    // magic is free unless the KH2 HUD mod is there to show MP
+    float cost = (copy.type >> 4) == kTypeMagic && kh2_hud_running() ? spell_cost(copy.id) : 0;
     if (cost != 0) {
         if (g_mpCharging || g_mp <= 0 || (cost > 0 && g_mp < cost)) return 0;   // not enough MP
     }
@@ -444,30 +473,23 @@ static void install_hooks() {
     const uint8_t gate_open[5]   = {0xB8, 0x00, 0x00, 0x00, 0x00};
     if (memcmp(gate, gate_expect, 5) == 0 && write_code(gate, gate_open, 5)) logf("play gate open");
     else logf("play gate: unexpected bytes, card hud will stay visible"), g_hideCards = false;
-
-    // Outside battle the game shows the current map card bottom right, where
-    // the status gauges now are. The room map and this panel share one hide
-    // bit; make only the panel's test read it as set.  and eax,8 -> or eax,8
-    uint8_t* panel = reinterpret_cast<uint8_t*>(g_base + rva::kMapCardGate);
-    const uint8_t panel_expect[3] = {0x83, 0xE0, 0x08};
-    const uint8_t panel_hide[3]   = {0x83, 0xC8, 0x08};
-    if (memcmp(panel, panel_expect, 3) == 0 && write_code(panel, panel_hide, 3)) logf("map card panel hidden");
-    else logf("map card panel: unexpected bytes, leaving it");
 }
 
-static void frame() {
+static void set_hud_flags(uint32_t bits) {
+    uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
+    if ((f & bits) != bits) reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | bits);
+}
+
+// Where Sora is and how he is doing. Returns his deck, or 0 outside battle.
+static uintptr_t publish_status() {
     uintptr_t deck = player_deck();
     OverlayState& hud = overlay_state();
+    hud.menu = true;
+    hud.kh2Hud = kh2_hud_running();
     hud.world = at<uint8_t>(g_base + rva::kWorld);
     if (!deck) {
-        // every battle starts on Attack with nothing open
-        if (g_menu.sub || g_menu.main != kCmdAttack) {
-            g_menu = Menu{};
-            publish_menu();
-        }
-
-        // Walking around: status gauges only, HP from the save block since the
-        // battle object is not there.
+        // Walking around: HP from the save block, since the battle object is
+        // not there.
         hud.battle = false;
         uintptr_t fieldPlayer = at<uintptr_t>(g_base + rva::kPlayerPtr);
         uintptr_t save = at<uintptr_t>(g_base + rva::kSavePtr);
@@ -476,18 +498,32 @@ static void frame() {
         if (hud.visible) {
             hud.hp = at<int32_t>(save);
             hud.hpMax = at<int32_t>(save + 4);
-            hud.mp = g_mp / kMpMax;
-            hud.mpCharging = g_mpCharging;
-            if (g_hideCards) {
-                uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
-                if (!(f & kFlagHidePlayerGauge))
-                    reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | kFlagHidePlayerGauge);
-            }
         }
-        return;
+        return 0;
     }
     hud.visible = true;
     hud.battle = true;
+    uintptr_t player = at<uintptr_t>(g_base + rva::kPlayerPtr);
+    hud.hp = at<int32_t>(player + kPlHp);
+    hud.hpMax = at<int32_t>(player + kPlHpMax);
+    return deck;
+}
+
+static void frame() {
+    uintptr_t deck = publish_status();
+    if (volatile SharedHud* b = shared_hud()) {
+        b->combatTick = GetTickCount64();
+        b->mp = g_mp / kMpMax;
+        b->mpCharging = g_mpCharging;
+    }
+    if (!deck) {
+        // every battle starts on Attack with nothing open
+        if (g_menu.sub || g_menu.main != kCmdAttack) {
+            g_menu = Menu{};
+            publish_menu();
+        }
+        return;
+    }
     update_menu();
     park_deck_cursor(deck);
 
@@ -502,11 +538,6 @@ static void frame() {
             g_mpCharging = false;
         }
     }
-    overlay_state().mp = g_mp / kMpMax;
-    overlay_state().mpCharging = g_mpCharging;
-    uintptr_t player = at<uintptr_t>(g_base + rva::kPlayerPtr);
-    overlay_state().hp = at<int32_t>(player + kPlHp);
-    overlay_state().hpMax = at<int32_t>(player + kPlHpMax);
 
     // F6 shows the game's own HUD again, for comparing against the original
     bool hideKey = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
@@ -519,11 +550,8 @@ static void frame() {
         }
     }
     g_hideKeyDown = hideKey;
-    if (g_hideCards) {
-        uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
-        if ((f & kFlagHideHud) != kFlagHideHud)
-            reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | kFlagHideHud);
-    }
+    // the cards go; the portrait and HP gauge stay unless the KH2 HUD mod takes them
+    if (g_hideCards) set_hud_flags(kFlagHideCards);
 
     // out of cards: finish a reload straight away
     if (at<int32_t>(deck + kDkState) == 1 && at<int16_t>(deck + kDkCardsLeft) == 0) {
@@ -552,6 +580,30 @@ static void frame() {
     }
 }
 
+// Safety net for a hang at start-up, which in exclusive fullscreen takes the
+// whole desktop with it: for the first few minutes, if the game stops calling
+// in for 20 seconds, note how far things got and end the process.
+static volatile LONG g_beat = 0;
+static const char* volatile g_stage = "start";
+
+static DWORD WINAPI watchdog(void*) {
+    const ULONGLONG began = GetTickCount64();
+    LONG seen = g_beat;
+    ULONGLONG since = began;
+    while (GetTickCount64() - began < 180000) {
+        Sleep(1000);
+        if (g_beat != seen) {
+            seen = g_beat;
+            since = GetTickCount64();
+        } else if (GetTickCount64() - since > 20000) {
+            logf("watchdog: no frame for 20 s after frame %ld, last stage: %s. ending the game", seen, g_stage);
+            TerminateProcess(GetCurrentProcess(), 1);
+        }
+    }
+    logf("watchdog: start-up went fine (%ld frames), standing down", g_beat);
+    return 0;
+}
+
 static int guarded_frame() {
     __try {
         frame();
@@ -570,13 +622,20 @@ __declspec(dllexport) int rc_frame(void*) {
         g_base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
         open_log();
         logf("loaded, exe base %p", reinterpret_cast<void*>(g_base));
+        CloseHandle(CreateThread(nullptr, 0, &watchdog, nullptr, 0, nullptr));
+        g_stage = "installing";
         install_hooks();
         overlay_install(&logf);
     }
+    // the first frames are logged one by one, so a hang shows where it stopped
+    const LONG n = InterlockedIncrement(&g_beat);
+    if (n <= 5 || n == 60 || n == 600) logf("frame %ld", n);
+    g_stage = "frame";
     if (int code = guarded_frame()) {
         logf("exception %08X, disabling", code);
         g_disabled = true;
     }
+    g_stage = "between frames";
     return 0;
 }
 

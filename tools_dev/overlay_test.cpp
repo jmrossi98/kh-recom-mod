@@ -3,6 +3,7 @@
 // BMP, so the menu can be worked on without starting the game.
 //
 //   overlay_test.exe out.bmp [width height] [selected] [sub]
+#include <cstring>
 #include "../src/overlay.h"
 
 #include <windows.h>
@@ -57,6 +58,13 @@ int main(int argc, char** argv) {
     if (selected < 0) selected = 0;
     overlay_state().selected = selected;
     overlay_state().mp = 0.62f;
+    // OVERLAY_MODS: "combat" or "hud" to draw as if only that mod were installed
+    const char* mods = getenv("OVERLAY_MODS");
+    overlay_state().menu = !mods || !strcmp(mods, "combat");
+    overlay_state().gauge = !mods || !strcmp(mods, "hud");
+    overlay_state().kh2Hud = overlay_state().gauge;
+    overlay_state().mpBar = !mods;
+    overlay_state().context = getenv("OVERLAY_CONTEXT");   // e.g. Examine
     overlay_state().hp = 54;
     overlay_state().hpMax = 80;
     // OVERLAY_WORLD picks the menu skin, OVERLAY_FRAMES how many frames to run
