@@ -193,9 +193,20 @@ def main():
         pieces = Image.open(os.path.join(ui, "-4140.dds")).convert("RGBA")
         words = Image.open(os.path.join(ui, "-20c0.dds")).convert("RGBA")
         assert pieces.size == (256, 384) and words.size == (256, 256), (pieces.size, words.size)
-        sheet = Image.new("RGBA", (256, 640))
+        # The sheets are small for a screen this size. Enlarge both four times;
+        # the words and icons are flat shapes in the alpha channel, so their
+        # edges can be tightened back up afterwards instead of left soft.
+        k = 4
+        # (premultiplied while resizing, so clear texels do not darken the edges)
+        pieces = pieces.convert("RGBa").resize((256 * k, 384 * k), Image.LANCZOS).convert("RGBA")
+        words = words.resize((256 * k, 256 * k), Image.BICUBIC)
+        r, g, b, alpha = words.split()
+        alpha = alpha.point(lambda v: max(0, min(255, int((v - 128) * 4 + 128))))
+        grey = Image.new("L", words.size, 128)
+        words = Image.merge("RGBA", (grey, grey, grey, alpha))
+        sheet = Image.new("RGBA", (256 * k, 640 * k))
         sheet.paste(pieces, (0, 0))
-        sheet.paste(words, (0, 384))
+        sheet.paste(words, (0, 384 * k))
         with open(os.path.join(out, "kh1_command.rgba"), "wb") as f:
             f.write(sheet.tobytes())
         print("wrote", os.path.join(out, "kh1_command.rgba"))

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <vector>
 
 namespace {
@@ -571,7 +572,7 @@ bool init(IDXGISwapChain* sc) {
     }
     g_face = load_rgba("kh2_face.rgba", 1024, 512);
     g_kh2 = load_rgba("kh2_gauge.rgba", kKh2SheetW, kKh2SheetH);
-    g_kh1 = load_rgba("kh1_command.rgba", 256, 640);
+    g_kh1 = load_rgba("kh1_command.rgba", 1024, 2560);   // the 256x640 layout, enlarged four times
     g_kfont = load_rgba("kh2_font.rgba", 1024, 512);
     if (g_kfont) {
         g_kfontCount = static_cast<int>(load_bytes("kh2_font.bin", g_kfontWidth, sizeof(g_kfontWidth)));
@@ -1332,71 +1333,77 @@ void draw_menu_kh2() {
 
 // ---- KH1's command menu ----
 //
-// What the combat mod shows on its own. KH1 has no layout data to follow: its
-// menu is a handful of grey pieces on one sheet (command2/uitex.bin), which
-// the game tints and stacks. Sizes come from the sheet, half a KH1 screen
-// unit to the texel; where the pieces go is measured off the game.
+// What the combat mod shows on its own. The pieces are grey shapes on one
+// sheet (command2/uitex.bin) that the game tints and stacks. Where they go,
+// their colours and how they move are KH1's own numbers, from its menu code
+// and the sprite files it loads (exchange/*_uibin_*.bin): positions on KH1's
+// 512 wide screen, colours as bytes, key frames at 30 to the second with
+// straight lines between them.
 namespace kh1 {
-struct Rect { int x0, y0, x1, y1; };
+struct Rect { int x0, y0, x1, y1; };             // on the sheet, two texels to a screen unit
 constexpr float kSheetW = 256, kSheetH = 640;   // the pieces, with the words and icons sheet under them
 constexpr int kWords = 384;                      // where that second sheet starts
 constexpr Rect kHeader = {4, 4, 252, 44};
 constexpr Rect kSlot = {4, 48, 252, 92};
 constexpr Rect kSlotLast = {4, 96, 252, 140};
-constexpr Rect kGlowTop = {7, 151, 233, 166};    // the selected slot's inside, upper and lower half
-constexpr Rect kGlowBottom = {4, 170, 234, 196};
-constexpr Rect kSelected = {4, 200, 250, 248};   // the selected slot's outline
-constexpr Rect kContextTop = {8, 253, 226, 265};   // the same three for the context command's bar
-constexpr Rect kContextBottom = {8, 270, 233, 296};
+constexpr Rect kGlowTop = {4, 152, 234, 164};    // the lit slot's inside, upper and lower half
+constexpr Rect kGlowBottom = {4, 170, 234, 194};
+constexpr Rect kSelected = {4, 200, 250, 248};   // the lit slot's outline
+constexpr Rect kContextTop = {4, 253, 228, 265};   // the same three for the context command's bar
+constexpr Rect kContextBottom = {4, 270, 234, 296};
 constexpr Rect kContext = {6, 300, 248, 348};
-constexpr Rect kIconTriangle = {185, kWords + 219, 217, kWords + 253};
-constexpr Rect kWordCommand = {4, kWords + 2, 156, kWords + 25};
+constexpr Rect kWordCommand = {4, kWords + 4, 156, kWords + 22};
 constexpr Rect kWordItem = {158, kWords + 2, 238, kWords + 25};
 constexpr Rect kWordMagic = {3, kWords + 26, 105, kWords + 48};
 constexpr Rect kWordSummon = {106, kWords + 26, 237, kWords + 48};
-constexpr Rect kIconKey = {9, kWords + 219, 31, kWords + 253};
-constexpr Rect kIconHat = {39, kWords + 220, 71, kWords + 251};
-constexpr Rect kIconPotion = {79, kWords + 219, 105, kWords + 253};
-constexpr Rect kIconStar = {207, kWords + 133, 241, kWords + 163};
+// icons are 16 unit squares, the bottom row of the sheet 18 apart
+constexpr Rect kIconKey = {4, kWords + 220, 36, kWords + 252};
+constexpr Rect kIconHat = {40, kWords + 220, 72, kWords + 252};
+constexpr Rect kIconPotion = {76, kWords + 220, 108, kWords + 252};
+constexpr Rect kIconStar = {208, kWords + 132, 240, kWords + 164};
+constexpr Rect kIconTriangle = {184, kWords + 220, 216, kWords + 252};
 
-// One menu's colours: its frame, the word in its header, and the selected
-// slot's outline and two-tone inside.
-struct Look { float frame[3], word[3], edge[3], top[3], bottom[3]; };
-constexpr Look kField  = {{0.14f, 0.33f, 0.74f}, {0.50f, 0.74f, 1.00f}, {0.22f, 0.52f, 1.00f}, {0.00f, 0.01f, 0.05f}, {0.05f, 0.14f, 0.50f}};
-constexpr Look kBattle = {{0.52f, 0.17f, 0.19f}, {0.96f, 0.42f, 0.42f}, {0.88f, 0.38f, 0.33f}, {0.04f, 0.00f, 0.00f}, {0.46f, 0.07f, 0.07f}};
-constexpr Look kMagic  = {{0.32f, 0.27f, 0.60f}, {0.74f, 0.68f, 1.00f}, {0.52f, 0.46f, 0.90f}, {0.01f, 0.01f, 0.05f}, {0.20f, 0.16f, 0.50f}};
-constexpr Look kItems  = {{0.18f, 0.50f, 0.27f}, {0.30f, 1.00f, 0.42f}, {0.34f, 0.82f, 0.45f}, {0.00f, 0.03f, 0.01f}, {0.06f, 0.36f, 0.12f}};
-constexpr Look kSummon = {{0.70f, 0.41f, 0.10f}, {1.00f, 0.66f, 0.20f}, {0.96f, 0.60f, 0.15f}, {0.04f, 0.02f, 0.00f}, {0.48f, 0.23f, 0.02f}};
+// One menu's colours, as the game's bytes: its frame, the word in its header,
+// and the lit slot's outline and the colour its inside runs down to.
+struct Look { unsigned char frame[3], word[3], edge[3], glow[3]; };
+constexpr Look kField  = {{20, 56, 119}, {86, 126, 223}, {86, 125, 231}, {20, 56, 119}};
+constexpr Look kBattle = {{109, 30, 32}, {200, 80, 80}, {216, 109, 100}, {109, 30, 32}};
+constexpr Look kMagic  = {{65, 55, 118}, {145, 129, 234}, {117, 98, 218}, {48, 40, 93}};
+constexpr Look kItems  = {{58, 86, 66}, {77, 216, 96}, {68, 170, 89}, {30, 69, 57}};
+constexpr Look kSummon = {{123, 69, 31}, {213, 135, 38}, {213, 135, 38}, {97, 57, 31}};
+constexpr unsigned char kContextEdge[3] = {110, 210, 100}, kContextMid[3] = {3, 11, 3}, kContextGlow[3] = {30, 110, 32};
+constexpr unsigned char kIconTints[4][3] = {{238, 100, 100}, {145, 129, 234}, {77, 216, 96}, {213, 135, 38}};
+constexpr float kLabel = 230 / 255.0f;       // every usable label, lit or not
+constexpr float kLabelDim = 115 / 255.0f;    // a menu with a list open over it
 
-constexpr float kRow = 22, kHeaderH = 20;   // KH1 screen units (512x448)
-constexpr float kLeft = 16, kBottom = 18;   // the menu's corner, from the picture's bottom left
-constexpr float kSelectedShift = 12;        // the selected slot sits this far right, and its label a little more
-constexpr float kLabelX = 17, kSelectedLabelX = 18;
-constexpr float kContextW = 156, kContextH = 24;   // the context bar is drawn wider than its art
-constexpr Look kContextLook = {{0, 0, 0}, {0.35f, 0.80f, 0.55f}, {0.36f, 0.86f, 0.42f}, {0.00f, 0.03f, 0.01f}, {0.05f, 0.30f, 0.10f}};
-constexpr float kListShift = 12;            // and a list this far right of the menu under it
-constexpr int kListRows = 7;
+// The 2D screen is 512 wide; I take it as 384 tall, which puts the menu the
+// same 16 units from the bottom as from the left.
+constexpr float kScreenH = 384;
+constexpr float kMenuX = 16, kMenuY = 260;   // top left of the header
+constexpr float kHeaderH = 20, kRow = 22;
+constexpr float kMainW = 113, kListW = 112, kItemListW = 140;
+constexpr float kFrameLeft = 62;             // a frame's left part keeps its size, the rest stretches
+constexpr float kCursorX = 11, kCursorY = -2;   // the lit slot, from its row
+constexpr float kCursorOver = 13;            // it overshoots to here on its way out
+constexpr float kIconX = 13 + 75, kIconY = 4, kIconSize = 16;   // icon, from the lit slot; lists have their own x
+constexpr float kListIconX = 87, kItemListIconX = 115;
+constexpr float kLitInset = 8;               // the lit slot's inside is this much narrower than its outline
+constexpr float kLabelX = 16, kLabelY = 2;
+constexpr float kListX = 11;                 // a list, from the menu under it
+constexpr float kListBottom = 368;
+constexpr int kMagicRows = 8, kSummonRows = 7;
+constexpr float kContextW = 147, kContextH = 24;   // the bar's outline; the game stretches the art too
 }
 
-// A piece of the sheet with its top left at x, y (pixels), tinted.
-void kh1_piece(float x, float y, float unit, const kh1::Rect& r, const float tint[3], float alpha = 1) {
+float kh1_unit() { return g_h / kh1::kScreenH; }
+
+// A piece stretched over a rectangle (pixels), shaded from one colour at its
+// top to another at its bottom. Colours are bytes.
+void kh1_quad(float x0, float y0, float x1, float y1, const kh1::Rect& r, const unsigned char top[3],
+              const unsigned char bottom[3], float alpha = 1, float bright = 1) {
     // the pieces are mid grey, so twice the tint gives the colour asked for
-    const float c[4] = {tint[0] * 2, tint[1] * 2, tint[2] * 2, alpha};
-    const float x1 = x + (r.x1 - r.x0) * 0.5f * unit, y1 = y + (r.y1 - r.y0) * 0.5f * unit;
-    const float u0 = r.x0 / kh1::kSheetW, u1 = r.x1 / kh1::kSheetW;
-    const float v0 = r.y0 / kh1::kSheetH, v1 = r.y1 / kh1::kSheetH;
-    vert(x, y, u0, v0, c);
-    vert(x1, y, u1, v0, c);
-    vert(x, y1, u0, v1, c);
-    vert(x1, y, u1, v0, c);
-    vert(x1, y1, u1, v1, c);
-    vert(x, y1, u0, v1, c);
-}
-
-// A piece stretched over a rectangle (pixels) and shaded from one colour at
-// its top to another at its bottom.
-void kh1_shaded(float x0, float y0, float x1, float y1, const kh1::Rect& r, const float top[3], const float bottom[3]) {
-    const float ct[4] = {top[0] * 2, top[1] * 2, top[2] * 2, 1}, cb[4] = {bottom[0] * 2, bottom[1] * 2, bottom[2] * 2, 1};
+    const float k = 2 * bright / 255.0f;
+    const float ct[4] = {top[0] * k, top[1] * k, top[2] * k, alpha}, cb[4] = {bottom[0] * k, bottom[1] * k, bottom[2] * k, alpha};
     const float u0 = r.x0 / kh1::kSheetW, u1 = r.x1 / kh1::kSheetW;
     const float v0 = r.y0 / kh1::kSheetH, v1 = r.y1 / kh1::kSheetH;
     vert(x0, y0, u0, v0, ct);
@@ -1407,109 +1414,219 @@ void kh1_shaded(float x0, float y0, float x1, float y1, const kh1::Rect& r, cons
     vert(x0, y1, u0, v1, cb);
 }
 
-// Header and slots of one menu, standing on the shared bottom line. The row
-// at `selected` gets the lit slot and the icon. Labels at or below `coveredFrom`
-// are left out, for a menu with a list over it.
-void kh1_menu(float x, int rows, int selected, const kh1::Look& look, const kh1::Rect& word, const char* const* names,
-              const kh1::Rect& icon, const float iconTint[3], float coveredFrom) {
-    const float u = g_h / 448.0f;
-    const float top = g_h - (kh1::kBottom + rows * kh1::kRow + kh1::kHeaderH) * u;
-    const float bright[4] = {0.96f, 0.96f, 0.96f, 1}, plain[4] = {0.84f, 0.84f, 0.84f, 1};
+// A piece at its own size with its top left at x, y (pixels), unless a width
+// in units is given.
+void kh1_piece(float x, float y, const kh1::Rect& r, const unsigned char tint[3], float alpha = 1, float bright = 1,
+               float width = 0) {
+    const float u = kh1_unit();
+    const float w = width > 0 ? width : (r.x1 - r.x0) * 0.5f;
+    kh1_quad(x, y, x + w * u, y + (r.y1 - r.y0) * 0.5f * u, r, tint, tint, alpha, bright);
+}
+
+// A frame piece drawn to a width: the slanted left end as it is, the rest
+// stretched or squeezed to fit.
+void kh1_frame(float x, float y, float width, const kh1::Rect& r, const unsigned char tint[3], float alpha, float bright) {
+    const float u = kh1_unit();
+    const int split = r.x0 + static_cast<int>(kh1::kFrameLeft * 2);
+    const float y1 = y + (r.y1 - r.y0) * 0.5f * u, xm = x + kh1::kFrameLeft * u;
+    kh1_quad(x, y, xm, y1, {r.x0, r.y0, split, r.y1}, tint, tint, alpha, bright);
+    kh1_quad(xm, y, x + width * u, y1, {split, r.y0, r.x1, r.y1}, tint, tint, alpha, bright);
+}
+
+// A lit shape: shadow, outline, and an inside that is black at the top and
+// runs down to a colour. x, y is the outline's top left, width in units. The
+// inside sits 6 in, its upper part from 2 down and its lower from 9, and is
+// narrower than the outline by `inset`.
+void kh1_lit(float x, float y, float width, const kh1::Rect& edge, const kh1::Rect& top, const kh1::Rect& bottom,
+             const unsigned char edgeTint[3], const unsigned char mid[3], const unsigned char glow[3], float alpha,
+             float inset = kh1::kLitInset, float insetTop = kh1::kLitInset) {
+    const float u = kh1_unit();
+    const unsigned char black[3] = {0, 0, 0};
+    kh1_piece(x + 3 * u, y + 3 * u, edge, black, alpha * 0.5f, 1, width);
+    kh1_piece(x, y, edge, edgeTint, alpha, 1, width);
+    kh1_quad(x + 6 * u, y + 9 * u, x + (6 + width - inset) * u, y + 22 * u, bottom, mid, glow, alpha);
+    kh1_quad(x + 6 * u, y + 2 * u, x + (6 + width - insetTop) * u, y + 9 * u + 1, top, black, mid, alpha);
+}
+
+// Position of something that moves in a straight line between key frames,
+// KH1's way. Keys are at 30 to the second; the overlay counts frames at 60.
+float kh1_keys(unsigned since, const float* at, const float* value, int count) {
+    const float t = since / 2.0f;
+    if (t <= at[0]) return value[0];
+    for (int i = 1; i < count; ++i)
+        if (t < at[i]) return value[i - 1] + (value[i] - value[i - 1]) * (t - at[i - 1]) / (at[i] - at[i - 1]);
+    return value[count - 1];
+}
+
+struct Kh1Menu {
+    float x, y, width;        // top left of the header, units
+    int rows, selected;       // selected -1: no lit slot
+    const kh1::Look* look;
+    const kh1::Rect* word;
+    const char* const* names;
+    const kh1::Rect* icon;
+    const unsigned char* iconTint;
+    unsigned cursorAge;       // frames since the cursor landed on its row
+    float iconX;              // icon, from the lit slot's left
+    int gapRow;               // a row left empty with no lit slot: where the cursor was when a list opened
+    float alpha, bright;      // the whole menu's
+    float coverTop, coverBottom;   // labels of rows between these (pixels) are under a list and left out
+};
+
+void kh1_menu(const Kh1Menu& m) {
+    const float u = kh1_unit();
+    const float x = m.x * u, top = g_h - (kh1::kScreenH - m.y) * u;
+    const float labelShade = m.bright < 1 ? kh1::kLabelDim : kh1::kLabel;
+    const float label[4] = {labelShade, labelShade, labelShade, m.alpha};
+    auto covered = [&](float y) { return y + kh1::kRow * u > m.coverTop + 4 * u && y < m.coverBottom - 4 * u; };
     g_out = &g_cmdVerts;
-    kh1_piece(x, top, u, kh1::kHeader, look.frame);
-    kh1_piece(x + 6 * u, top + 4.25f * u, u, word, look.word);
-    for (int i = 0; i < rows; ++i) {
-        // the selected row has no slot of its own: the lit one stands in the gap
-        if (i == selected) continue;
+    kh1_frame(x, top, m.width, kh1::kHeader, m.look->frame, m.alpha, m.bright);
+    kh1_piece(x + 4 * u, top + 6 * u, *m.word, m.look->word, m.alpha, m.bright);
+    for (int i = 0; i < m.rows; ++i) {
+        // the cursor's row has no slot of its own: the lit one stands in the gap
+        if (i == m.selected || i == m.gapRow) continue;
         const float y = top + (kh1::kHeaderH + i * kh1::kRow) * u;
-        kh1_piece(x, y, u, i == rows - 1 ? kh1::kSlotLast : kh1::kSlot, look.frame);
+        kh1_frame(x, y, m.width, i == m.rows - 1 ? kh1::kSlotLast : kh1::kSlot, m.look->frame, m.alpha, m.bright);
+        if (!covered(y)) menu_text(x + kh1::kLabelX * u, y + (kh1::kLabelY - cmd::kGlyphDrop) * u, m.names[i], label);
     }
-    for (int i = 0; i < rows; ++i) {
-        const float y = top + (kh1::kHeaderH + i * kh1::kRow) * u;
-        if (i == selected) {
-            // the lit slot is a little taller than a row and sticks out to the right
-            const float sx = x + kh1::kSelectedShift * u, sy = y - u;
-            g_out = &g_cmdVerts;
-            kh1_piece(sx, sy, u, kh1::kSelected, look.edge);
-            // Its inside is the same shape a little smaller, in two halves on
-            // the sheet, near black at the top and running to the menu's
-            // colour at the bottom. What shows of the outline is a thin rim.
-            const float rim = 1.5f * u;
-            const float ix0 = sx + rim, ix1 = sx + (kh1::kSelected.x1 - kh1::kSelected.x0) * 0.5f * u - rim;
-            const float iy0 = sy + rim, iy1 = sy + (kh1::kSelected.y1 - kh1::kSelected.y0) * 0.5f * u - rim;
-            const float topH = static_cast<float>(kh1::kGlowTop.y1 - kh1::kGlowTop.y0);
-            const float split = topH / (topH + (kh1::kGlowBottom.y1 - kh1::kGlowBottom.y0));
-            const float iym = iy0 + (iy1 - iy0) * split;
-            const float mid[3] = {look.top[0] + (look.bottom[0] - look.top[0]) * split,
-                                  look.top[1] + (look.bottom[1] - look.top[1]) * split,
-                                  look.top[2] + (look.bottom[2] - look.top[2]) * split};
-            // the upper half's slanted corner starts a little in from the lower half's edge
-            const float lean = (kh1::kGlowTop.x0 - kh1::kGlowBottom.x0) * 0.5f * u;
-            kh1_shaded(ix0 + lean, iy0, ix1, iym, kh1::kGlowTop, look.top, mid);
-            kh1_shaded(ix0, iym - 1, ix1, iy1, kh1::kGlowBottom, mid, look.bottom);   // a pixel of overlap hides the join
-            const float iw = (icon.x1 - icon.x0) * 0.5f, ih = (icon.y1 - icon.y0) * 0.5f;
-            kh1_piece(sx + (107 - iw / 2) * u, sy + (12 - ih / 2) * u, u, icon, iconTint);
-            if (y < coveredFrom) menu_text(sx + kh1::kSelectedLabelX * u, y - 1.25f * u, names[i], bright);
-        } else if (y < coveredFrom) {
-            menu_text(x + kh1::kLabelX * u, y - 1.25f * u, names[i], plain);
-        }
+    if (m.selected < 0 || m.selected >= m.rows) return;
+
+    // The lit slot starts on its row, is past its place a frame later and
+    // settles the frame after, showing up over the first of those. Its icon
+    // comes in from the left during that first frame.
+    static const float kAt[3] = {0, 1, 2}, kOut[3] = {0, kh1::kCursorOver, kh1::kCursorX};
+    static const float kAppear[2] = {0, 1}, kShow[2] = {0, 1}, kFly[2] = {-139, 0};
+    const unsigned char black[3] = {0, 0, 0};
+    const float out = kh1_keys(m.cursorAge, kAt, kOut, 3);
+    const float show = kh1_keys(m.cursorAge, kAppear, kShow, 2) * m.alpha;
+    const float y = top + (kh1::kHeaderH + m.selected * kh1::kRow) * u;
+    const float sx = x + out * u, sy = y + kh1::kCursorY * u;
+    g_out = &g_cmdVerts;
+    // as wide as the menu it belongs to
+    kh1_lit(sx, sy, m.width, kh1::kSelected, kh1::kGlowTop, kh1::kGlowBottom, m.look->edge, black, m.look->glow, show);
+    const float ix = sx + (m.iconX + kh1_keys(m.cursorAge, kAppear, kFly, 2)) * u, iy = sy + kh1::kIconY * u;
+    kh1_quad(ix, iy, ix + kh1::kIconSize * u, iy + kh1::kIconSize * u, *m.icon, m.iconTint, m.iconTint, show);
+    if (!covered(y)) {
+        const float lit[4] = {kh1::kLabel, kh1::kLabel, kh1::kLabel, m.alpha};
+        menu_text(sx + kh1::kLabelX * u, y + (kh1::kLabelY - cmd::kGlyphDrop) * u, m.names[m.selected], lit);
     }
 }
 
 void draw_menu_kh1() {
     static const char* kItems[4] = {"Attack", "Magic", "Items", "Summon"};
     static const kh1::Rect kIcons[4] = {kh1::kIconKey, kh1::kIconHat, kh1::kIconPotion, kh1::kIconStar};
-    static const float kIconTints[4][3] = {
-        {0.95f, 0.36f, 0.36f}, {0.72f, 0.62f, 1.00f}, {0.30f, 0.86f, 0.42f}, {1.00f, 0.66f, 0.20f}};
     const OverlayState st = g_state;
-    const float u = g_h / 448.0f;
+    const float u = kh1_unit();
     const float was = g_textAcross;
-    g_textAcross = 1;   // KH1's HD screen is square, unlike KH2's
+    g_textAcross = 1;   // KH1's screen is square, unlike KH2's
     g_textShadow = false;
 
-    int first = 0, shown = 0;
-    float coveredFrom = 1e9f;
-    if (st.subOpen) {
-        first = st.subSelected >= kh1::kListRows ? st.subSelected - kh1::kListRows + 1 : 0;
-        shown = st.subCount - first < kh1::kListRows ? st.subCount - first : kh1::kListRows;
-        if (shown < 1) shown = 1;
-        coveredFrom = g_h - (kh1::kBottom + shown * kh1::kRow + kh1::kHeaderH + kh1::kRow / 2) * u;
-    }
-    const float x = kh1::kLeft * u;
     const int sel = st.selected >= 0 && st.selected < 4 ? st.selected : 0;
-    kh1_menu(x, 4, st.subOpen ? -1 : sel, st.battle ? kh1::kBattle : kh1::kField, kh1::kWordCommand, kItems, kIcons[sel],
-             kIconTints[sel], coveredFrom);
+    const bool still = g_testSince >= 0;   // the test programs want the settled picture
+
+    // when the cursor last landed somewhere, and when the list last opened
+    static int lastMain = -1, lastSub = -1;
+    static bool lastOpen = false;
+    static unsigned mainFrame = 0, subFrame = 0, openFrame = 0;
+    if (sel != lastMain || (lastOpen && !st.subOpen)) lastMain = sel, mainFrame = g_frameNo;
+    if (st.subOpen && !lastOpen) openFrame = g_frameNo;
+    const int subKey = st.subOpen ? st.subSelected : -1;
+    if (subKey != lastSub) lastSub = subKey, subFrame = g_frameNo;
+    lastOpen = st.subOpen;
+    const unsigned settled = 1000;
+
+    // The list: bottom on the menu's bottom line, except that a short Magic
+    // or Items list hangs from the row it came from, and Summon opens beside
+    // its own row when it fits.
+    const int cap = sel == 3 ? kh1::kSummonRows : kh1::kMagicRows;
+    int first = 0, shown = 0;
+    float listY = 0;
     if (st.subOpen) {
-        const kh1::Look& look = sel == 2 ? kh1::kItems : (sel == 3 ? kh1::kSummon : kh1::kMagic);
-        const kh1::Rect& word = sel == 2 ? kh1::kWordItem : (sel == 3 ? kh1::kWordSummon : kh1::kWordMagic);
-        const char* names[kh1::kListRows];
+        first = st.subSelected >= cap ? st.subSelected - cap + 1 : 0;
+        shown = st.subCount - first < cap ? st.subCount - first : cap;
+        if (shown < 1) shown = 1;
+        listY = kh1::kListBottom - kh1::kHeaderH - kh1::kRow * shown;
+        if (sel == 1 && shown < 3) listY = kh1::kMenuY + kh1::kRow;
+        if (sel == 2 && shown < 2) listY = kh1::kMenuY + 2 * kh1::kRow;
+        const float beside = kh1::kMenuY + kh1::kRow * sel;
+        if (sel == 3 && beside + kh1::kHeaderH + kh1::kRow * shown <= kh1::kListBottom + 1) listY = beside;
+    }
+
+    Kh1Menu main{};
+    main.x = kh1::kMenuX;
+    main.y = kh1::kMenuY;
+    main.width = kh1::kMainW;
+    main.rows = 4;
+    main.selected = st.subOpen ? -1 : sel;   // a menu with a list over it has no cursor
+    main.look = st.battle ? &kh1::kBattle : &kh1::kField;
+    main.word = &kh1::kWordCommand;
+    main.names = kItems;
+    main.icon = &kIcons[sel];
+    main.iconTint = kh1::kIconTints[sel];
+    main.cursorAge = still ? settled : g_frameNo - mainFrame;
+    main.iconX = kh1::kIconX;
+    main.gapRow = st.subOpen ? sel : -1;   // its row stays empty
+    main.alpha = 1;
+    // and goes to half brightness, except the red battle frames
+    main.bright = st.subOpen && !st.battle ? 0.5f : 1;
+    main.coverTop = main.coverBottom = -1;
+    if (st.subOpen) {
+        main.coverTop = g_h - (kh1::kScreenH - listY) * u;
+        main.coverBottom = main.coverTop + (kh1::kHeaderH + kh1::kRow * shown) * u;
+    }
+    kh1_menu(main);
+
+    if (st.subOpen) {
+        // every piece of a list comes in together: from the menu's edge, past
+        // its place and back over two frames, showing up over the first
+        static const float kAt[3] = {0, 1, 2}, kSlide[3] = {-kh1::kListX, 2, 0};
+        static const float kAppear[2] = {0, 1}, kShow[2] = {0, 1};
+        const unsigned age = still ? settled : g_frameNo - openFrame;
+        const char* names[kh1::kMagicRows];
         for (int i = 0; i < shown; ++i)
             names[i] = st.subCount == 0 ? "Nothing" : (st.subNames[first + i] ? st.subNames[first + i] : "?");
-        kh1_menu(x + kh1::kListShift * u, shown, st.subCount > 0 ? st.subSelected - first : -1, look, word, names,
-                 kIcons[sel], kIconTints[sel], 1e9f);
+        Kh1Menu list{};
+        list.x = kh1::kMenuX + kh1::kListX + kh1_keys(age, kAt, kSlide, 3);
+        list.y = listY;
+        list.width = sel == 2 ? kh1::kItemListW : kh1::kListW;
+        list.rows = shown;
+        list.selected = st.subCount > 0 ? st.subSelected - first : -1;
+        list.look = sel == 2 ? &kh1::kItems : (sel == 3 ? &kh1::kSummon : &kh1::kMagic);
+        list.word = sel == 2 ? &kh1::kWordItem : (sel == 3 ? &kh1::kWordSummon : &kh1::kWordMagic);
+        list.names = names;
+        list.icon = &kIcons[sel];
+        list.iconTint = kh1::kIconTints[sel];
+        list.cursorAge = still ? settled : g_frameNo - subFrame;
+        list.iconX = sel == 2 ? kh1::kItemListIconX : kh1::kListIconX;
+        list.gapRow = -1;
+        list.alpha = kh1_keys(age, kAppear, kShow, 2);
+        list.bright = 1;
+        list.coverTop = list.coverBottom = -1;
+        kh1_menu(list);
     }
+
     // The context command lies over the header, wider than the menu and
-    // pointing right. Not while a list is open.
-    if (st.context && !st.subOpen) {
-        const kh1::Look& look = kh1::kContextLook;
-        const float bx = x - 10 * u, bw = kh1::kContextW * u, bh = kh1::kContextH * u;
-        const float by = g_h - (kh1::kBottom + 4 * kh1::kRow + kh1::kHeaderH + 3) * u;
-        const float rim = 1.5f * u;
+    // pointing right. It takes 7 frames to come in, sliding the last 10
+    // units, and 7 to fade out where it is. A new label comes in afresh.
+    static const char* shownContext = nullptr;
+    static unsigned contextFrame = 0;
+    static bool contextUp = false;
+    const bool want = st.context && !st.subOpen;
+    if (want != contextUp || (want && st.context != shownContext)) contextUp = want, contextFrame = g_frameNo;
+    if (want) shownContext = st.context;
+    static const float kIn[2] = {0, 7}, kFade[2] = {0, 1}, kSlide[2] = {-10, 0};
+    const unsigned age = still ? settled : g_frameNo - contextFrame;
+    const float shade = contextUp ? kh1_keys(age, kIn, kFade, 2) : 1 - kh1_keys(age, kIn, kFade, 2);
+    if (shownContext && shade > 0) {
+        const float slide = contextUp ? kh1_keys(age, kIn, kSlide, 2) : 0;
+        const float bx = (kh1::kMenuX - 8 + slide) * u, by = g_h - (kh1::kScreenH - (kh1::kMenuY - 8)) * u;
         g_out = &g_cmdVerts;
-        kh1_shaded(bx, by, bx + bw, by + bh, kh1::kContext, look.edge, look.edge);
-        const float topH = static_cast<float>(kh1::kContextTop.y1 - kh1::kContextTop.y0);
-        const float split = topH / (topH + (kh1::kContextBottom.y1 - kh1::kContextBottom.y0));
-        const float iy0 = by + rim, iy1 = by + bh - rim, iym = iy0 + (iy1 - iy0) * split;
-        const float mid[3] = {look.top[0] + (look.bottom[0] - look.top[0]) * split,
-                              look.top[1] + (look.bottom[1] - look.top[1]) * split,
-                              look.top[2] + (look.bottom[2] - look.top[2]) * split};
-        // the inside stops short of the point, as on the sheet
-        const float ix1 = bx + bw - rim - 7 * u;
-        kh1_shaded(bx + rim, iy0, ix1 - 3 * u, iym, kh1::kContextTop, look.top, mid);
-        kh1_shaded(bx + rim, iym - 1, ix1, iy1, kh1::kContextBottom, mid, look.bottom);
-        kh1_piece(bx + 12 * u, by + 3.5f * u, u, kh1::kIconTriangle, look.word);
-        const float white[4] = {0.96f, 0.96f, 0.96f, 1};
-        menu_text(bx + 38 * u, by - 0.25f * u, st.context, white);
+        kh1_lit(bx, by, kh1::kContextW, kh1::kContext, kh1::kContextTop, kh1::kContextBottom, kh1::kContextEdge,
+                kh1::kContextMid, kh1::kContextGlow, shade, kh1::kContextW - 136, kh1::kContextW - 134);
+        const float gx = bx + 14 * u, gy = by + 5 * u;
+        kh1_quad(gx, gy, gx + 16 * u, gy + 16 * u, kh1::kIconTriangle, kh1::kContextEdge, kh1::kContextEdge, shade, 0.6f);
+        const float white[4] = {kh1::kLabel, kh1::kLabel, kh1::kLabel, shade};
+        menu_text(bx + 35 * u, by + (5 - cmd::kGlyphDrop) * u, shownContext, white);
     }
     g_textAcross = was;
     g_textShadow = true;

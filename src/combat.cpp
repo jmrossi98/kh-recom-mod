@@ -33,6 +33,19 @@ constexpr uintptr_t kGetFlags    = 0x1B08C0;  // uint (int group, int id)
 constexpr uintptr_t kSetFlags    = 0x1B16C0;  // void (int group, int id, uint value)
 constexpr uintptr_t kPlayGate    = 0x16CF3E;  // mov eax,2: the bit that blocks the player's plays
 constexpr uintptr_t kMapCardGate = 0x1E4818;  // and eax,8: hide test for the map card panel
+constexpr uintptr_t kFindTask    = 0x2AD350;  // void* (int id): the object behind a task id
+constexpr uintptr_t kSubField    = 0x87B0B0;  // -> CGameSubField; +0x5A0 flags for what is open over the game
+constexpr uintptr_t kHudOff      = 0x87B808;  // int, non-zero while the game keeps its own HUD off
+constexpr uintptr_t kPlaySe      = 0x2AA360;  // uint (uint id, int volume): a sound effect, -1 for full volume
+// vtables of what the field's lock-on marker can offer to act on
+constexpr uintptr_t kVtDoor      = 0x572478;
+constexpr uintptr_t kVtChest     = 0x58B5B0;
+constexpr uintptr_t kVtChestPooh = 0x687C10;
+constexpr uintptr_t kVtCarry     = 0x56E128;
+constexpr uintptr_t kVtCarryTu   = 0x58C720;
+constexpr uintptr_t kVtSavePoint = 0x5846C8;
+constexpr uintptr_t kVtWarpPoint = 0x58F7E0;
+constexpr uintptr_t kVtAvatar    = 0x520828;
 }
 
 // Flag word the card code checks all over the place. Bit 2 hides the player's
@@ -99,7 +112,7 @@ const CardName kCardNames[] = {
     {31, "Stop"},      {32, "Aero"},       {35, "Simba"},       {36, "Genie"},  {37, "Bambi"},
     {38, "Dumbo"},     {39, "Tinker Bell"}, {40, "Mushu"},      {41, "Cloud"},  {42, "Potion"},
     {43, "Hi-Potion"}, {44, "Mega-Potion"}, {45, "Ether"},      {46, "Mega-Ether"},
-    {47, "Elixir"},    {48, "Megalixir"},
+    {47, "Elixir"},    {48, "Megalixir"},     {49, "Donald"},      {50, "Goofy"},
 };
 
 const char* card_name(uint8_t id) {
@@ -127,6 +140,10 @@ float spell_cost(uint8_t id) {
 // The command menu. Up and down move the cursor here; confirm is left to the
 // game, and the play-card hook decides what the press means from this state.
 enum Command { kCmdAttack, kCmdMagic, kCmdItems, kCmdSummon, kCmdCount };
+
+// the friend cards, as the game makes them
+constexpr CardData kDonald = {49, 0, 1, 0x44};
+constexpr CardData kGoofy = {50, 0, 1, 0x44};
 
 struct Menu {
     int main = kCmdAttack;
@@ -243,6 +260,12 @@ static void open_submenu(int command) {
     static const uint8_t kKind[kCmdCount] = {kTypeAttack, kTypeMagic, kTypeItem, kTypeSummon};
     g_menu.subCount = 0;
     g_menu.subSel = 0;
+    // Donald and Goofy head the Summon list and are always there, instead of
+    // being friend cards that have to be picked up off the floor mid-battle.
+    if (command == kCmdSummon) {
+        g_menu.subCards[g_menu.subCount++] = kDonald;
+        g_menu.subCards[g_menu.subCount++] = kGoofy;
+    }
     uintptr_t deck = player_deck();
     if (deck) {
         int n = at<int16_t>(deck + kDkCardCount);
@@ -283,6 +306,15 @@ static void park_deck_cursor(uintptr_t deck) {
 }
 
 // D-pad or arrow keys move the cursor, B / Backspace / left closes a submenu.
+// The game's own menu sounds, the ones its pause menu and shop use. Each call
+// starts a new voice, so these go on a press and never on a held state.
+enum MenuSound { kSeCursor = 1, kSeConfirm = 2, kSeOpen = 3, kSeCancel = 4, kSeError = 5 };
+
+static void menu_sound(MenuSound id) {
+    using PlaySeFn = uint32_t (*)(uint32_t id, int32_t volume);
+    reinterpret_cast<PlaySeFn>(g_base + rva::kPlaySe)(id, -1);
+}
+
 static void update_menu() {
     XINPUT_STATE pad{};
     WORD buttons = XInputGetState(0, &pad) == ERROR_SUCCESS ? pad.Gamepad.wButtons : 0;
@@ -303,11 +335,16 @@ static void update_menu() {
 
     int step = (down ? 1 : 0) - (up ? 1 : 0);
     if (g_menu.sub) {
-        if (back) g_menu.sub = false;
-        else if (step && g_menu.subCount > 0)
+        if (back) {
+            g_menu.sub = false;
+            menu_sound(kSeCancel);
+        } else if (step && g_menu.subCount > 1) {
             g_menu.subSel = (g_menu.subSel + step + g_menu.subCount) % g_menu.subCount;
+            menu_sound(kSeCursor);
+        }
     } else if (step) {
         g_menu.main = (g_menu.main + step + kCmdCount) % kCmdCount;
+        menu_sound(kSeCursor);
     }
     if (step || back) publish_menu();
 }
@@ -327,18 +364,25 @@ static uint64_t play_card_hook(void* battle, uint32_t handle, int32_t side, void
     if (!g_menu.sub) {
         if (g_menu.main != kCmdAttack) {
             open_submenu(g_menu.main);
+            menu_sound(kSeOpen);
             return 0;
         }
         copy = kBasicAttack;
     } else {
-        if (g_menu.subCount == 0) return 0;
+        if (g_menu.subCount == 0) {
+            menu_sound(kSeError);
+            return 0;
+        }
         copy = g_menu.subCards[g_menu.subSel];
     }
 
     // magic is free unless the KH2 HUD mod is there to show MP
     float cost = (copy.type >> 4) == kTypeMagic && kh2_hud_running() ? spell_cost(copy.id) : 0;
     if (cost != 0) {
-        if (g_mpCharging || g_mp <= 0 || (cost > 0 && g_mp < cost)) return 0;   // not enough MP
+        if (g_mpCharging || g_mp <= 0 || (cost > 0 && g_mp < cost)) {   // not enough MP
+            menu_sound(kSeError);
+            return 0;
+        }
     }
 
     uint64_t r = real(battle, handle, side, nullptr, &copy, flag);
@@ -350,7 +394,10 @@ static uint64_t play_card_hook(void* battle, uint32_t handle, int32_t side, void
             g_mpCharging = true;
         }
     }
-    if (r && g_menu.sub) close_submenu();
+    if (r && g_menu.sub) {
+        menu_sound(kSeConfirm);
+        close_submenu();
+    }
     return 0;
 }
 
@@ -480,6 +527,56 @@ static void set_hud_flags(uint32_t bits) {
     if ((f & bits) != bits) reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | bits);
 }
 
+// Outside battle the game marks the nearest thing in reach, and raises a flag
+// on the marker when it is something to act on rather than just look at: a
+// door, a chest, a save point, someone to talk to. That is the moment for the
+// menu's context command. Returns its label, or null.
+static const char* field_context(uintptr_t player) {
+    constexpr uintptr_t kPlMarker = 0x3F8;     // -> Gauge::CLockonMarker
+    constexpr uintptr_t kPlControl = 0x230;    // bit 0: the player has control
+    constexpr uintptr_t kMkTarget = 0xD0;      // task id of what is marked
+    constexpr uintptr_t kMkEnabled = 0xF0;
+    constexpr uintptr_t kMkFlags = 0xF8;       // 0x10 something to act on, 1 hidden
+    if (!(at<uint32_t>(player + kPlControl) & 1)) return nullptr;
+    uintptr_t marker = at<uintptr_t>(player + kPlMarker);
+    if (!marker || !at<int32_t>(marker + kMkEnabled)) return nullptr;
+    int32_t id = at<int32_t>(marker + kMkTarget);
+    uint32_t flags = at<uint32_t>(marker + kMkFlags);
+    if (id <= 0 || !(flags & 0x10) || (flags & 1)) return nullptr;
+
+    using FindTaskFn = void* (*)(int);
+    void* obj = reinterpret_cast<FindTaskFn>(g_base + rva::kFindTask)(id);
+    if (!obj) return nullptr;
+    switch (at<uintptr_t>(reinterpret_cast<uintptr_t>(obj)) - g_base) {
+        case rva::kVtDoor:
+        case rva::kVtChest:
+        case rva::kVtChestPooh: return "Open";
+        case rva::kVtSavePoint: return "Save";
+        case rva::kVtWarpPoint: return "Warp";
+        case rva::kVtAvatar: return "Talk";
+        case rva::kVtCarry:
+        case rva::kVtCarryTu: return "Lift";
+        default: return "Examine";
+    }
+}
+
+// True while something of the game's own is up over play: the start menu, the
+// pause screen, the save menu. The game asks the same question before it lets
+// a menu open, with the same mask.
+static bool game_menu_open() {
+    constexpr uintptr_t kSfFlags = 0x5A0;
+    constexpr uint32_t kBusy = 0x80201C01;
+    uintptr_t sub = at<uintptr_t>(g_base + rva::kSubField);
+    uint32_t flags = sub ? at<uint32_t>(sub + kSfFlags) : 0;
+    int32_t hudOff = at<int32_t>(g_base + rva::kHudOff);
+    static uint32_t lastFlags = 0;
+    static int32_t lastOff = 0;
+    if (flags != lastFlags || hudOff != lastOff) logf("game state: flags %08X, hud off %d", flags, hudOff);
+    lastFlags = flags;
+    lastOff = hudOff;
+    return (flags & kBusy) != 0 || hudOff != 0;
+}
+
 // Where Sora is and how he is doing. Returns his deck, or 0 outside battle.
 static uintptr_t publish_status() {
     uintptr_t deck = player_deck();
@@ -494,15 +591,21 @@ static uintptr_t publish_status() {
         uintptr_t fieldPlayer = at<uintptr_t>(g_base + rva::kPlayerPtr);
         uintptr_t save = at<uintptr_t>(g_base + rva::kSavePtr);
         hud.visible = fieldPlayer && save && at<uint8_t>(g_base + rva::kWorld) != 0xFF &&
-                      at<uint8_t>(g_base + rva::kLoading) != 0xFF;
+                      at<uint8_t>(g_base + rva::kLoading) != 0xFF && !game_menu_open();
+        hud.context = nullptr;
         if (hud.visible) {
             hud.hp = at<int32_t>(save);
             hud.hpMax = at<int32_t>(save + 4);
+            hud.context = field_context(fieldPlayer);
+            static const char* lastContext = nullptr;
+            if (hud.context != lastContext) logf("context: %s", hud.context ? hud.context : "none");
+            lastContext = hud.context;
         }
         return 0;
     }
-    hud.visible = true;
+    hud.visible = !game_menu_open();
     hud.battle = true;
+    hud.context = nullptr;
     uintptr_t player = at<uintptr_t>(g_base + rva::kPlayerPtr);
     hud.hp = at<int32_t>(player + kPlHp);
     hud.hpMax = at<int32_t>(player + kPlHpMax);
@@ -557,26 +660,6 @@ static void frame() {
     if (at<int32_t>(deck + kDkState) == 1 && at<int16_t>(deck + kDkCardsLeft) == 0) {
         reinterpret_cast<ReloadDoneFn>(g_base + rva::kReloadDone)(reinterpret_cast<void*>(deck), 0);
         logf("auto reload");
-    }
-
-    // Experiment: F5 calls Donald and F7 Goofy without a friend card, to see
-    // whether party members can be brought in by the mod instead of picked up.
-    static const struct { int key; CardData card; const char* who; } kFriends[] = {
-        {VK_F5, {49, 0, 1, 0x44}, "donald"},
-        {VK_F7, {50, 0, 1, 0x44}, "goofy"},
-    };
-    static bool friendKeyDown[2] = {};
-    for (int i = 0; i < 2; ++i) {
-        bool down = (GetAsyncKeyState(kFriends[i].key) & 0x8000) != 0;
-        if (down && !friendKeyDown[i] && at<int32_t>(deck + kDkState) == 1) {
-            void* battle = reinterpret_cast<GetObjectFn>(g_base + rva::kGetObject)(kObjBattle);
-            if (battle) {
-                uint64_t r = reinterpret_cast<SetPlayCardFn>(g_base + rva::kSetPlayCard)(
-                    battle, at<uint32_t>(deck + kDkHandle), at<int32_t>(deck + kDkSide), nullptr, &kFriends[i].card, 0);
-                logf("friend %s -> %llu", kFriends[i].who, r);
-            }
-        }
-        friendKeyDown[i] = down;
     }
 }
 

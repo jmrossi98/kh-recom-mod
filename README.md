@@ -14,11 +14,19 @@ top of this one or works by itself:
 ## What works
 
 - KH1's command menu, built from KH1's own menu pieces, header words and
-  icons: Attack, Magic, Items, Summon. Blue outside battle and red in it, the
-  selected slot lit and set to the right, lists in their own colours opening
-  over the menu. Up/down (D-pad or arrow keys) move the cursor, the game's
-  confirm button acts, B / Backspace / left backs out of a list. Shown outside
-  battle too, where it is only for looks. Labels are in KH2's font for now
+  icons and laid out, coloured and animated by KH1's own numbers (its menu
+  code and the sprite files it loads): Attack, Magic, Items, Summon. Blue
+  outside battle and red in it, the selected slot lit and sliding out to the
+  right, lists in their own colours opening over the menu. Up/down (D-pad or
+  arrow keys) move the cursor, the game's confirm button acts, B / Backspace /
+  left backs out of a list. Shown outside battle too, where it is only for
+  looks. Labels are in KH2's font for now
+- The context command over the menu when something is in reach outside
+  battle: Open at a door or chest, Save on a save point, Talk, Lift, Warp.
+  Display only, the game's own button still does it
+- The game's own menu sounds: cursor, open, back, confirm, error
+- Donald and Goofy head the Summon list and are always there
+- Hidden while the game's start menu, pause screen or save menu is up
 - With the KH2 HUD mod installed the menu is KH2's instead, laid out from
   KH2's own data and skinned for the world
 - Attack always swings a Kingdom Key 9 and never uses a card up
@@ -36,10 +44,8 @@ top of this one or works by itself:
 
 - Combat itself is not KH1's yet: Sora's combos, timing and the enemies are
   still the card game's underneath
-- The context command (Examine and the like) is drawn but nothing sets it yet
 - Enemies still play cards (you just can't see them)
-- Party members: F5 / F7 call Donald / Goofy without a friend card as a test,
-  nothing automatic yet
+- Calling Donald or Goofy still dims the battlefield the way a friend card does
 - Enemy cards are unreachable (they live on the deck's second row)
 - Items and summons are free
 
