@@ -135,8 +135,12 @@ int main(int argc, char** argv) {
         o.subSelected = selected;
         for (int i = 0; i < 6; ++i) o.subNames[i] = names[i];
     }
+    // OVERLAY_HURT: lose HP between the two frames, to see the damage effect
+    const bool hurt = getenv("OVERLAY_HURT") != nullptr;
+    if (hurt) overlay_state().hp = 72;
     if (!overlay_draw_now(sc, &logf)) { printf("overlay did not initialise\n"); return 1; }
     // a second frame on the same buffer, to catch anything that only breaks on reuse
+    if (hurt) overlay_state().hp = 44;
     overlay_draw_now(sc, &logf);
     wait_queue();
 

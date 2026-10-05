@@ -10,12 +10,14 @@ Very much a work in progress.
 - KH2 command menu, drawn from KH2's own sheets, layout data and font, with
   its opening animation: Attack, Magic, Items, Summon. The skin follows the
   world: KH2's own for the worlds the two games share, its standard menu for
-  the rest (KH2 has no Traverse Town, Wonderland, Monstro or Neverland). Up/down (D-pad
+  the rest (KH2 has no Traverse Town, Wonderland, Monstro or Neverland).
+  The whole menu turns red in battle and blue outside it, as in KH2. Up/down (D-pad
   or arrow keys) move the cursor, the game's confirm button acts, B / Backspace
   / left backs out of a list. Shown outside battle too, where it is only for looks
-- KH2 status gauges bottom right: KH2's portrait of Sora in his KH1 clothes
-  (normal, hurt, down), the HP ring growing clockwise with max HP and spilling
-  into a bar once it is full, and the MP bar
+- KH2 status gauges bottom right: Sora's portrait frame and KH2's portrait of
+  him in his KH1 clothes, the HP ring growing clockwise with max HP on its
+  black backing ring, and the MP bar. Lost HP shows red and fades, the
+  portrait winces and the frame flushes red when hit and pulses at low HP
 - Attack always swings a Kingdom Key 9 and never uses a card up
 - Magic, Items and Summon open a list built from what is in the deck. Nothing
   leaves the deck when used
