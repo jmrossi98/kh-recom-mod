@@ -756,19 +756,21 @@ void hud_sprite(const Hud& h, float x0, float y0, float x1, float y1, float u0, 
 // screen). Each point takes its texel from the mirrored quarter it falls in.
 void hud_ring(const Hud& h, float centreU, float a0, float a1, const float c[4]) {
     if (a1 <= a0) return;
-    const int steps = static_cast<int>((a1 - a0) / 3) + 1;
+    // Thin slices, and the outer edge exactly on the sprite's edge: every point
+    // then maps to its own texel with no clamping, so the ring's outline keeps
+    // an even width all the way round.
+    const int steps = static_cast<int>((a1 - a0) / 1.5f) + 1;
     for (int i = 0; i < steps; ++i) {
         float t0 = (a0 + (a1 - a0) * i / steps) * kPi / 180;
         float t1 = (a0 + (a1 - a0) * (i + 1) / steps) * kPi / 180;
         float pts[4][2] = {
-            {kRingBandIn * cosf(t0), kRingBandIn * sinf(t0)}, {kRingR * 1.05f * cosf(t0), kRingR * 1.05f * sinf(t0)},
-            {kRingBandIn * cosf(t1), kRingBandIn * sinf(t1)}, {kRingR * 1.05f * cosf(t1), kRingR * 1.05f * sinf(t1)},
+            {kRingBandIn * cosf(t0), kRingBandIn * sinf(t0)}, {kRingR * cosf(t0), kRingR * sinf(t0)},
+            {kRingBandIn * cosf(t1), kRingBandIn * sinf(t1)}, {kRingR * cosf(t1), kRingR * sinf(t1)},
         };
         const int order[6] = {0, 1, 2, 1, 3, 2};
         for (int k : order) {
             float x = pts[k][0], y = pts[k][1];
-            float ax = fabsf(x) > kRingR ? kRingR : fabsf(x), ay = fabsf(y) > kRingR ? kRingR : fabsf(y);
-            hud_vert(h, x, y, centreU - ax, kUvCentreV - ay, c);
+            hud_vert(h, x, y, centreU - fabsf(x), kUvCentreV - fabsf(y), c);
         }
     }
 }
@@ -839,7 +841,7 @@ void draw_status_kh2() {
 
     g_out = &g_faceVerts;
     if (g_face) {
-        const float r = 30 * h.unit;
+        const float r = 28.5f * h.unit;
         quad(h.cx - r, h.cy - r, 2 * r, 2 * r, white, white, 0, 0, 0, 1, 1);
     }
     g_out = &g_verts;
@@ -1062,8 +1064,64 @@ void render_d3d11(IDXGISwapChain* sc) {
 }
 
 // D3D12 swap chain: wrap the current back buffer for our D3D11On12 device,
-// draw, and hand it back in the present state. Nothing is kept between frames
-// so the game can still resize its buffers.
+// draw, and hand it back in the present state. The wrappers are kept per back
+// buffer, because making them every frame is slow enough to feel. They hold
+// references to the buffers, so they have to go before the game resizes the
+// swap chain: see the ResizeBuffers hooks.
+struct WrappedBuffer {
+    ID3D12Resource* buffer;
+    ID3D11Resource* wrapped;
+    ID3D11RenderTargetView* rtv;
+    UINT width, height;
+};
+constexpr int kMaxBuffers = 8;
+WrappedBuffer g_buffers[kMaxBuffers];
+int g_bufferCount = 0;
+
+void release_buffers() {
+    if (!g_bufferCount) return;
+    for (int i = 0; i < g_bufferCount; ++i) {
+        g_buffers[i].rtv->Release();
+        g_buffers[i].wrapped->Release();
+        g_buffers[i].buffer->Release();
+    }
+    g_bufferCount = 0;
+    // 11on12 only lets go of the D3D12 resources once its context is flushed
+    ID3D11RenderTargetView* none = nullptr;
+    g_ctx->OMSetRenderTargets(1, &none, nullptr);
+    g_ctx->Flush();
+}
+
+WrappedBuffer* wrap_buffer(ID3D12Resource* back12) {
+    for (int i = 0; i < g_bufferCount; ++i)
+        if (g_buffers[i].buffer == back12) return &g_buffers[i];
+    if (g_bufferCount == kMaxBuffers) release_buffers();
+
+    D3D11_RESOURCE_FLAGS flags{};
+    flags.BindFlags = D3D11_BIND_RENDER_TARGET;
+    WrappedBuffer w{};
+    HRESULT hr = g_on12->CreateWrappedResource(back12, &flags, D3D12_RESOURCE_STATE_PRESENT,
+                                               D3D12_RESOURCE_STATE_PRESENT, __uuidof(ID3D11Resource),
+                                               reinterpret_cast<void**>(&w.wrapped));
+    if (FAILED(hr)) {
+        static bool once = false;
+        if (!once && g_log) g_log("overlay: CreateWrappedResource failed (%08X)", hr);
+        once = true;
+        return nullptr;
+    }
+    if (FAILED(g_dev->CreateRenderTargetView(w.wrapped, nullptr, &w.rtv))) {
+        w.wrapped->Release();
+        return nullptr;
+    }
+    D3D12_RESOURCE_DESC desc = back12->GetDesc();
+    w.width = static_cast<UINT>(desc.Width);
+    w.height = desc.Height;
+    w.buffer = back12;
+    back12->AddRef();
+    g_buffers[g_bufferCount] = w;
+    return &g_buffers[g_bufferCount++];
+}
+
 void render_d3d12(IDXGISwapChain* sc) {
     IDXGISwapChain3* sc3 = nullptr;
     if (FAILED(sc->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&sc3)))) return;
@@ -1072,32 +1130,15 @@ void render_d3d12(IDXGISwapChain* sc) {
 
     ID3D12Resource* back12 = nullptr;
     if (FAILED(sc->GetBuffer(index, __uuidof(ID3D12Resource), reinterpret_cast<void**>(&back12)))) return;
-    D3D12_RESOURCE_DESC desc = back12->GetDesc();
-
-    D3D11_RESOURCE_FLAGS flags{};
-    flags.BindFlags = D3D11_BIND_RENDER_TARGET;
-    ID3D11Resource* wrapped = nullptr;
-    HRESULT hr = g_on12->CreateWrappedResource(back12, &flags, D3D12_RESOURCE_STATE_PRESENT,
-                                               D3D12_RESOURCE_STATE_PRESENT, __uuidof(ID3D11Resource),
-                                               reinterpret_cast<void**>(&wrapped));
+    WrappedBuffer* w = wrap_buffer(back12);
     back12->Release();
-    if (FAILED(hr)) {
-        static bool once = false;
-        if (!once && g_log) g_log("overlay: CreateWrappedResource failed (%08X)", hr);
-        once = true;
-        return;
-    }
+    if (!w) return;
 
-    g_on12->AcquireWrappedResources(&wrapped, 1);
-    ID3D11RenderTargetView* rtv = nullptr;
-    if (SUCCEEDED(g_dev->CreateRenderTargetView(wrapped, nullptr, &rtv))) {
-        if (fill_vertices(static_cast<UINT>(desc.Width), desc.Height)) bind_and_draw(rtv);
-        ID3D11RenderTargetView* none = nullptr;
-        g_ctx->OMSetRenderTargets(1, &none, nullptr);
-        rtv->Release();
-    }
-    g_on12->ReleaseWrappedResources(&wrapped, 1);
-    wrapped->Release();
+    g_on12->AcquireWrappedResources(&w->wrapped, 1);
+    if (fill_vertices(w->width, w->height)) bind_and_draw(w->rtv);
+    ID3D11RenderTargetView* none = nullptr;
+    g_ctx->OMSetRenderTargets(1, &none, nullptr);
+    g_on12->ReleaseWrappedResources(&w->wrapped, 1);
     g_ctx->Flush();
 }
 
@@ -1135,6 +1176,34 @@ HRESULT STDMETHODCALLTYPE present1_hook(IDXGISwapChain1* sc, UINT sync, UINT fla
                                         const DXGI_PRESENT_PARAMETERS* params) {
     on_present(sc, flags);
     return g_realPresent1(sc, sync, flags, params);
+}
+
+using ResizeFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+using Resize1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*,
+                                              IUnknown* const*);
+ResizeFn g_realResize = nullptr;
+Resize1Fn g_realResize1 = nullptr;
+
+// The game cannot resize its swap chain while anything still references the
+// back buffers, so drop ours first.
+void before_resize(IDXGISwapChain* sc) {
+    if (sc != g_target || !g_on12) return;
+    __try {
+        release_buffers();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_failed = true;
+    }
+}
+
+HRESULT STDMETHODCALLTYPE resize_hook(IDXGISwapChain* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
+    before_resize(sc);
+    return g_realResize(sc, count, w, h, fmt, flags);
+}
+
+HRESULT STDMETHODCALLTYPE resize1_hook(IDXGISwapChain3* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags,
+                                       const UINT* masks, IUnknown* const* queues) {
+    before_resize(sc);
+    return g_realResize1(sc, count, w, h, fmt, flags, masks, queues);
 }
 
 bool patch_slot(void** slot, void* hook) {
@@ -1186,6 +1255,17 @@ bool overlay_install(void (*log)(const char* fmt, ...)) {
     void** vtbl = *reinterpret_cast<void***>(sc);
     g_realPresent = reinterpret_cast<PresentFn>(vtbl[8]);
     bool ok = patch_slot(&vtbl[8], reinterpret_cast<void*>(&present_hook));
+
+    // ResizeBuffers is slot 13, ResizeBuffers1 slot 39 of IDXGISwapChain3.
+    g_realResize = reinterpret_cast<ResizeFn>(vtbl[13]);
+    patch_slot(&vtbl[13], reinterpret_cast<void*>(&resize_hook));
+    IDXGISwapChain3* sc3 = nullptr;
+    if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&sc3)))) {
+        void** vtbl3 = *reinterpret_cast<void***>(sc3);
+        g_realResize1 = reinterpret_cast<Resize1Fn>(vtbl3[39]);
+        patch_slot(&vtbl3[39], reinterpret_cast<void*>(&resize1_hook));
+        sc3->Release();
+    }
 
     IDXGISwapChain1* sc1 = nullptr;
     if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain1), reinterpret_cast<void**>(&sc1)))) {

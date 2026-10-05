@@ -32,6 +32,7 @@ constexpr uintptr_t kInScroll    = 0x1F850C;  // rotate the deck one card
 constexpr uintptr_t kGetFlags    = 0x1B08C0;  // uint (int group, int id)
 constexpr uintptr_t kSetFlags    = 0x1B16C0;  // void (int group, int id, uint value)
 constexpr uintptr_t kPlayGate    = 0x16CF3E;  // mov eax,2: the bit that blocks the player's plays
+constexpr uintptr_t kMapCardGate = 0x1E4818;  // and eax,8: hide test for the map card panel
 }
 
 // Flag word the card code checks all over the place. Bit 2 hides the player's
@@ -444,6 +445,15 @@ static void install_hooks() {
     const uint8_t gate_open[5]   = {0xB8, 0x00, 0x00, 0x00, 0x00};
     if (memcmp(gate, gate_expect, 5) == 0 && write_code(gate, gate_open, 5)) logf("play gate open");
     else logf("play gate: unexpected bytes, card hud will stay visible"), g_hideCards = false;
+
+    // Outside battle the game shows the current map card bottom right, where
+    // the status gauges now are. The room map and this panel share one hide
+    // bit; make only the panel's test read it as set.  and eax,8 -> or eax,8
+    uint8_t* panel = reinterpret_cast<uint8_t*>(g_base + rva::kMapCardGate);
+    const uint8_t panel_expect[3] = {0x83, 0xE0, 0x08};
+    const uint8_t panel_hide[3]   = {0x83, 0xC8, 0x08};
+    if (memcmp(panel, panel_expect, 3) == 0 && write_code(panel, panel_hide, 3)) logf("map card panel hidden");
+    else logf("map card panel: unexpected bytes, leaving it");
 }
 
 static void frame() {
