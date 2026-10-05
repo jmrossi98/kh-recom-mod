@@ -110,6 +110,8 @@ int main(int argc, char** argv) {
     run_and_wait();
 
     overlay_state().visible = true;
+    overlay_state().battle = selected >= 0;   // a negative row shows the walking-around HUD
+    if (selected < 0) selected = 0;
     overlay_state().selected = selected;
     overlay_state().mp = 0.62f;
     overlay_state().hp = 54;

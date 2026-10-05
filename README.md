@@ -7,25 +7,38 @@ Very much a work in progress.
 
 ## What works
 
-- KH2 style command menu in battle: Attack, Magic, Items, Summon. Up/down
-  (D-pad or arrow keys) move the cursor, the game's confirm button acts,
-  B / Backspace / left backs out of a list
+- KH2 command menu in battle, drawn from KH2's own sheet and layout data
+  (Twilight Town's for now): Attack, Magic, Items, Summon. Up/down (D-pad or
+  arrow keys) move the cursor, the game's confirm button acts, B / Backspace /
+  left backs out of a list
+- KH2 status gauges bottom right, also from KH2's art: HP ring and bar, MP bar,
+  with Sora's portrait from Re:CoM. Shown in battle and while walking around
 - Attack always swings a Kingdom Key 9 and never uses a card up
 - Magic, Items and Summon open a list built from what is in the deck. Nothing
   leaves the deck when used
-- No card breaks: the two sides' cards never interact, so nothing gets broken
-  or refused in either direction
-- The deck can no longer be scrolled or switched by the player, the menu owns
-  those buttons
-- Reloading is instant
+- MP: spells cost MP, Cure takes all of it, and at zero it recharges with magic
+  locked until it is full
+- No card breaks: the two sides' cards never interact
+- The game's own HUD is hidden: deck, played cards on both sides, portrait.
+  F6 brings it back
+- The deck can no longer be scrolled or switched by the player
 
 ## Not done yet
 
-- The card stack is still drawn underneath the menu
-- Magic and items are free, there is no MP
-- Enemies still play cards
+- Enemies still play cards (you just can't see them)
 - Enemy cards and friend cards are unreachable (they live on the deck's second row)
-- Menu art is placeholder shapes and a system font
+- Menu text is a system font, not KH2's
+- Only the Twilight Town menu skin; no per-world skins yet
+- Items and summons are free
+
+## Art
+
+No game art is in this repo. `tools_dev/make_assets.py` builds what the overlay
+needs from your own extracted copies of Re:CoM and KH2 (both are in HD
+1.5+2.5 ReMIX) into `build/assets`. Without those files the overlay falls
+back to plain shapes.
+
+    python tools_dev/make_assets.py <extracted recom> build/assets <extracted kh2> <openkh Apps folder>
 
 ## Layout
 
@@ -35,8 +48,10 @@ Very much a work in progress.
   battle update.
 - `src/overlay.cpp` - draws the command menu over the game. The game presents
   from a D3D12 swap chain, so this hooks Present and draws through D3D11On12.
-- `tools_dev/` - small test programs that render the menu to a BMP without the
-  game, one on a D3D11 swap chain and one on D3D12. Build with `build_test.bat`.
+- `tools_dev/` - `make_assets.py` (see Art), two test programs that render the
+  overlay to a BMP without the game (D3D11 and D3D12 swap chains, build with
+  `build_test.bat`), and `kh2seq.py`, a software renderer for KH2 sequence
+  files used to work out what is in a .2dd.
 - `re/` - tools I use for poking at the game: a memory scanner, a snapshot
   differ, a watcher for the card battle state, and Ghidra headless scripts
   (xrefs, decompile, disassemble).

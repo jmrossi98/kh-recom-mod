@@ -5,7 +5,8 @@
 struct OverlayState {
     static constexpr int kMaxEntries = 16;
 
-    bool visible = false;   // only while a battle is running
+    bool visible = false;   // anything at all: in a battle or walking around
+    bool battle = false;    // in a battle: the command menu shows and its header goes red
     int selected = 0;       // highlighted command on the main menu, 0..3
 
     // Second level (Magic / Items / Summon). Replaces the main rows while open.

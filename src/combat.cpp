@@ -13,6 +13,9 @@
 namespace rva {
 constexpr uintptr_t kPlayerPtr   = 0x87B390;  // -> player battle object
 constexpr uintptr_t kBattleFlag  = 0x87B858;  // 0 field, 1 battle
+constexpr uintptr_t kSavePtr     = 0x87CBF8;  // -> save/status block: HP, max HP, ...
+constexpr uintptr_t kWorld       = 0x87B862;  // 0xFF in menus
+constexpr uintptr_t kLoading     = 0xAF70CA;  // 0xFF while loading
 constexpr uintptr_t kGetObject   = 0x2AD300;  // void* (uint id)
 constexpr uintptr_t kSetPlayCard = 0x163830;  // CBTL::setPlayCard
 constexpr uintptr_t kReloadDone  = 0x16B2B0;  // finishes a reload for a deck
@@ -35,9 +38,12 @@ constexpr uintptr_t kPlayGate    = 0x16CF3E;  // mov eax,2: the bit that blocks 
 // card HUD and normally also stops the player playing cards (cutscenes use it).
 constexpr int kFlagGroup = 1;
 constexpr int kFlagCards = 0xE2;
-constexpr uint32_t kFlagHidePlayerGauge = 1;   // portrait and HP ring, top left
-constexpr uint32_t kFlagHidePlayerCards = 2;
-constexpr uint32_t kFlagHideHud = kFlagHidePlayerGauge | kFlagHidePlayerCards;
+constexpr uint32_t kFlagHidePlayerGauge = 0x01;   // portrait and HP ring, top left
+constexpr uint32_t kFlagHidePlayerCards = 0x02;   // the deck in the corner
+constexpr uint32_t kFlagHidePlayerAll   = 0x20;   // every player card, the one in play too
+constexpr uint32_t kFlagHideEnemyAll    = 0x40;   // same for the enemy side
+constexpr uint32_t kFlagHideHud =
+    kFlagHidePlayerGauge | kFlagHidePlayerCards | kFlagHidePlayerAll | kFlagHideEnemyAll;
 
 constexpr uint32_t kObjBattle = 0x16;
 
@@ -47,7 +53,7 @@ constexpr uintptr_t kPlHp = 0x42C;
 constexpr uintptr_t kPlHpMax = 0x430;
 
 // deck object
-constexpr uintptr_t kDkFrameMs   = 0x14;  // s32, game time this frame in ms, 0 while paused
+constexpr uintptr_t kDkFrameTime = 0x14;  // s32, game time this frame, 0 while paused
 constexpr uintptr_t kDkHandle    = 0x58;
 constexpr uintptr_t kDkSide      = 0x5C;
 constexpr uintptr_t kDkState     = 0x60;  // 1 = idle, 2 = reloading
@@ -442,20 +448,42 @@ static void install_hooks() {
 
 static void frame() {
     uintptr_t deck = player_deck();
-    overlay_state().visible = deck != 0;
+    OverlayState& hud = overlay_state();
     if (!deck) {
         // every battle starts on Attack with nothing open
         if (g_menu.sub || g_menu.main != kCmdAttack) {
             g_menu = Menu{};
             publish_menu();
         }
+
+        // Walking around: status gauges only, HP from the save block since the
+        // battle object is not there.
+        hud.battle = false;
+        uintptr_t fieldPlayer = at<uintptr_t>(g_base + rva::kPlayerPtr);
+        uintptr_t save = at<uintptr_t>(g_base + rva::kSavePtr);
+        hud.visible = fieldPlayer && save && at<uint8_t>(g_base + rva::kWorld) != 0xFF &&
+                      at<uint8_t>(g_base + rva::kLoading) != 0xFF;
+        if (hud.visible) {
+            hud.hp = at<int32_t>(save);
+            hud.hpMax = at<int32_t>(save + 4);
+            hud.mp = g_mp / kMpMax;
+            hud.mpCharging = g_mpCharging;
+            if (g_hideCards) {
+                uint32_t f = reinterpret_cast<GetFlagsFn>(g_base + rva::kGetFlags)(kFlagGroup, kFlagCards);
+                if (!(f & kFlagHidePlayerGauge))
+                    reinterpret_cast<SetFlagsFn>(g_base + rva::kSetFlags)(kFlagGroup, kFlagCards, f | kFlagHidePlayerGauge);
+            }
+        }
         return;
     }
+    hud.visible = true;
+    hud.battle = true;
     update_menu();
     park_deck_cursor(deck);
 
     // the game's own frame time, so nothing here runs while it is paused
-    float dt = at<int32_t>(deck + kDkFrameMs) / 1000.0f;
+    // (measured: 2500 of its units to the second)
+    float dt = at<int32_t>(deck + kDkFrameTime) / 2500.0f;
     if (dt < 0 || dt > 0.25f) dt = 0;
     if (g_mpCharging) {
         g_mp += kMpMax * dt / kMpChargeSeconds;
