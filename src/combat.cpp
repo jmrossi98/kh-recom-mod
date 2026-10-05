@@ -158,7 +158,6 @@ static bool g_hideKeyDown = false;
 static WORD g_padPrev = 0;
 static bool g_keyPrev[4] = {};
 static FILE* g_log = nullptr;
-static bool g_playKeyDown = false;
 static bool g_disabled = false;
 
 template <typename T>
@@ -531,18 +530,25 @@ static void frame() {
         logf("auto reload");
     }
 
-    // F5: play a Kingdom Key 9 that is not in the deck
-    bool down = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
-    if (down && !g_playKeyDown && at<int32_t>(deck + kDkState) == 1) {
-        void* battle = reinterpret_cast<GetObjectFn>(g_base + rva::kGetObject)(kObjBattle);
-        if (battle) {
-            CardData card{1, 0, 9, 0x11};
-            uint64_t r = reinterpret_cast<SetPlayCardFn>(g_base + rva::kSetPlayCard)(
-                battle, at<uint32_t>(deck + kDkHandle), at<int32_t>(deck + kDkSide), nullptr, &card, 0);
-            logf("virtual card -> %llu", r);
+    // Experiment: F5 calls Donald and F7 Goofy without a friend card, to see
+    // whether party members can be brought in by the mod instead of picked up.
+    static const struct { int key; CardData card; const char* who; } kFriends[] = {
+        {VK_F5, {49, 0, 1, 0x44}, "donald"},
+        {VK_F7, {50, 0, 1, 0x44}, "goofy"},
+    };
+    static bool friendKeyDown[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        bool down = (GetAsyncKeyState(kFriends[i].key) & 0x8000) != 0;
+        if (down && !friendKeyDown[i] && at<int32_t>(deck + kDkState) == 1) {
+            void* battle = reinterpret_cast<GetObjectFn>(g_base + rva::kGetObject)(kObjBattle);
+            if (battle) {
+                uint64_t r = reinterpret_cast<SetPlayCardFn>(g_base + rva::kSetPlayCard)(
+                    battle, at<uint32_t>(deck + kDkHandle), at<int32_t>(deck + kDkSide), nullptr, &kFriends[i].card, 0);
+                logf("friend %s -> %llu", kFriends[i].who, r);
+            }
         }
+        friendKeyDown[i] = down;
     }
-    g_playKeyDown = down;
 }
 
 static int guarded_frame() {

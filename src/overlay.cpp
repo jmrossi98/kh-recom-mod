@@ -69,6 +69,9 @@ ID3D11ShaderResourceView* g_font = nullptr;
 ID3D11ShaderResourceView* g_face = nullptr;   // Sora's portrait, optional
 ID3D11ShaderResourceView* g_kh2 = nullptr;    // KH2's gauge sheet, optional
 ID3D11ShaderResourceView* g_cmd = nullptr;    // KH2's command menu sheet, optional
+ID3D11ShaderResourceView* g_kfont = nullptr;  // KH2's system font, optional
+uint8_t g_kfontWidth[512];                    // advance of each glyph, in KH2 units
+int g_kfontCount = 0;
 IDXGISwapChain* g_target = nullptr;
 bool g_ready = false;
 bool g_failed = false;
@@ -79,11 +82,16 @@ float g_whiteU = 0, g_whiteV = 0;   // a solid texel in the atlas, for flat quad
 std::vector<Vertex> g_cmdVerts;    // KH2 command menu sheet
 std::vector<Vertex> g_gaugeVerts;  // KH2 gauge sheet
 std::vector<Vertex> g_faceVerts;   // portrait
+std::vector<Vertex> g_kfontVerts;  // KH2 font
 std::vector<Vertex> g_verts;       // font atlas: text and flat shapes
 std::vector<Vertex>* g_out = &g_verts;
 float g_mode = 1;                  // blend mode for the vertices being added
 unsigned g_frameNo = 0;            // counts presented frames, drives looping animations
+// The game draws a 16:9 picture and bars the rest of the back buffer. g_w and
+// g_h are that picture, which everything is laid out in; g_ox and g_oy are
+// where it starts in the real back buffer of g_bw by g_bh.
 float g_w = 1, g_h = 1;
+float g_ox = 0, g_oy = 0, g_bw = 1, g_bh = 1;
 
 const char* kShader = R"(
 struct VSIn  { float2 pos : POSITION; float2 uv : TEXCOORD0; float4 col : COLOR0; float mode : MODE0; };
@@ -216,6 +224,23 @@ ID3D11ShaderResourceView* load_rgba(const char* name, int width, int height) {
 }
 
 void vert(float x, float y, float u, float v, const float c[4]);
+
+// Reads a small file from the assets folder. Returns how many bytes it got.
+size_t load_bytes(const char* name, uint8_t* out, size_t capacity) {
+    char path[MAX_PATH];
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&load_bytes), &self);
+    DWORD n = GetModuleFileNameA(self, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != '\\' && path[n - 1] != '/') --n;
+    if (n == 0 || n + 40 >= MAX_PATH) return 0;
+    sprintf_s(path + n, MAX_PATH - n, "assets\\%s", name);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) return 0;
+    size_t got = fread(out, 1, capacity, f);
+    fclose(f);
+    return got;
+}
 
 // ---- KH2 sequence data ----
 //
@@ -488,8 +513,16 @@ bool init(IDXGISwapChain* sc) {
         if (g_log) g_log("overlay: building the font atlas failed");
         return false;
     }
-    g_face = load_rgba("face.rgba", 256, 256);
+    g_face = load_rgba("kh2_face.rgba", 1024, 512);
     g_kh2 = load_rgba("kh2_gauge.rgba", kKh2SheetW, kKh2SheetH);
+    g_kfont = load_rgba("kh2_font.rgba", 1024, 512);
+    if (g_kfont) {
+        g_kfontCount = static_cast<int>(load_bytes("kh2_font.bin", g_kfontWidth, sizeof(g_kfontWidth)));
+        if (g_kfontCount < 150) {
+            g_kfont->Release();
+            g_kfont = nullptr;
+        }
+    }
     g_cmd = load_rgba("kh2_command.rgba", kKh2SheetW, kKh2SheetH);
     if (g_cmd && !load_seq("kh2_command.seq", g_cmdSeq)) {
         g_cmd->Release();
@@ -501,8 +534,9 @@ bool init(IDXGISwapChain* sc) {
 // --- drawing, coordinates in backbuffer pixels ---
 
 void vert(float x, float y, float u, float v, const float c[4]) {
-    if (g_verts.size() + g_faceVerts.size() + g_gaugeVerts.size() + g_cmdVerts.size() >= kMaxVerts) return;
-    g_out->push_back({x / g_w * 2 - 1, 1 - y / g_h * 2, u, v, c[0], c[1], c[2], c[3], g_mode});
+    if (g_verts.size() + g_faceVerts.size() + g_gaugeVerts.size() + g_cmdVerts.size() + g_kfontVerts.size() >= kMaxVerts)
+        return;
+    g_out->push_back({(x + g_ox) / g_bw * 2 - 1, 1 - (y + g_oy) / g_bh * 2, u, v, c[0], c[1], c[2], c[3], g_mode});
 }
 
 // Quad with separate colours on the left and right edge, and a horizontal skew
@@ -775,16 +809,33 @@ void hud_ring(const Hud& h, float centreU, float a0, float a1, const float c[4])
     }
 }
 
+// KH2 lays its HUD out on a 416 line screen and pins it to the corners.
+float kh2_unit() { return g_h / 416.0f; }
+
+// Sprite from the portrait sheet (256x128 in the layout data, four times that
+// remastered), placed in HUD units like the gauge sprites.
+void face_sprite(const Hud& h, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1) {
+    const float white[4] = {1, 1, 1, 1};
+    const float ku = 4.0f / 1024, kv = 4.0f / 512;
+    const float px0 = h.cx + x0 * h.unit, px1 = h.cx + x1 * h.unit;
+    const float py0 = h.cy + y0 * h.unit, py1 = h.cy + y1 * h.unit;
+    vert(px0, py0, u0 * ku, v0 * kv, white);
+    vert(px1, py0, u1 * ku, v0 * kv, white);
+    vert(px0, py1, u0 * ku, v1 * kv, white);
+    vert(px1, py0, u1 * ku, v0 * kv, white);
+    vert(px1, py1, u1 * ku, v1 * kv, white);
+    vert(px0, py1, u0 * ku, v1 * kv, white);
+}
+
 void draw_status_kh2() {
     const OverlayState st = g_state;
     Hud h;
-    h.unit = g_h / 448.0f;
-    h.cx = g_w - 64 * h.unit;
-    h.cy = g_h - 68 * h.unit;
+    h.unit = kh2_unit();
+    h.cx = g_w - 62 * h.unit;    // measured off KH2 screenshots
+    h.cy = g_h - 58 * h.unit;
 
     const float white[4] = {1, 1, 1, 1};
     const float black[4] = {0, 0, 0, 1};
-    const float shade[4] = {0, 0, 0, 0.5f};
     const float red[4]   = {2.6f, 0.35f, 0.30f, 1};          // low HP backing
     const float mpWell[4]   = {0.031f, 0.086f, 0.656f, 1};   // tints straight from the layout data
     const float mpCharge[4] = {1.31f, 0.156f, 1.05f, 1};
@@ -793,41 +844,39 @@ void draw_status_kh2() {
 
     g_out = &g_gaugeVerts;
 
-    // --- portrait backing first, so the gauges sit on top of its flourishes ---
-    const float q = 29;
+    // dark disc under the portrait, out to the inside of the ring
+    const float q = 34;
     for (int sx = -1; sx <= 1; sx += 2)
-        for (int sy = -1; sy <= 1; sy += 2) {
-            hud_sprite(h, sx * q, sy * q, 0, 0, 127, 113, 156, 142, shade);
-            hud_sprite(h, sx * q, sy * q, 0, 0, 159, 103, 188, 132, black);
-        }
-    hud_sprite(h, 19, -29, 57, -3, 149, 60, 187, 86, black);
-    hud_sprite(h, -47, 12, -6, 28, 148, 86, 189, 102, black);
+        for (int sy = -1; sy <= 1; sy += 2) hud_sprite(h, sx * q, sy * q, 0, 0, 159, 103, 188, 132, black);
 
     // --- HP ---
+    // The gauge starts at 9 o'clock and runs clockwise. How far it reaches
+    // depends on max HP: a short arc early on, the full three quarters later,
+    // and past that a bar running left from the bottom of the ring. Current HP
+    // fills it from the same start, so damage comes off the far end.
+    const float kDegPerHp = 2.0f;   // about what KH2 shows: 60 HP is a third of the ring
+    const float kUnitsPerDeg = kPi / 180 * kRingMidR;
     float hpMax = st.hpMax > 0 ? static_cast<float>(st.hpMax) : 1;
-    float fill = st.hp <= 0 ? 0 : (st.hp >= st.hpMax ? 1 : st.hp / hpMax);
-    float bar = hpMax * 0.9f;                                 // bar grows with max HP
-    bar = bar < 30 ? 30 : (bar > 300 ? 300 : bar);
-    const float ringLen = 1.5f * kPi * kRingMidR;             // three quarters of a circle
-    const float filled = (ringLen + bar) * fill;
-    const bool low = fill <= 0.25f;
+    float hp = st.hp < 0 ? 0 : (st.hp > st.hpMax ? hpMax : static_cast<float>(st.hp));
+    float maxDeg = hpMax * kDegPerHp, curDeg = hp * kDegPerHp;
+    float bar = maxDeg > 270 ? (maxDeg - 270) * kUnitsPerDeg : 0;
+    if (bar > 330) bar = 330;
+    const bool low = hp <= hpMax * 0.25f;
 
-    // backing: ring from 9 o'clock round over the top to 6 o'clock, then the bar
-    const float* back = low ? red : white;
-    hud_ring(h, kUvDarkU, 180, 450, back);
-    hud_sprite(h, -bar, kRingR, 0, 0, kUvDarkU, 60, kUvDarkU, kUvCentreV, back);
-    hud_sprite(h, -kRingR, 0, 0, 2, 189, 49, 234, 52, white);                 // closes the ring's open end
-    hud_sprite(h, -bar - 1, 34, -bar, kRingR, 183, 49, 185, 59, black);       // bar's end cap
+    hud_ring(h, kUvDarkU, 180, 450, low ? red : white);          // the dark ring is always whole
+    hud_sprite(h, -kRingR, 0, 0, 2, 189, 49, 234, 52, white);    // closes its open end
+    if (bar > 0) hud_sprite(h, -bar, kRingR, 0, 0, kUvDarkU, 60, kUvDarkU, kUvCentreV, low ? red : white);
 
-    // fill: anchored at the ring's open end, so the bar's far tip goes first
-    if (filled > 0) {
-        float ringPart = filled < ringLen ? filled : ringLen;
-        hud_ring(h, kUvGreenU, 180, 180 + 270 * ringPart / ringLen, white);
-        if (filled > ringLen)
-            hud_sprite(h, -(filled - ringLen), kRingR, 0, 0, kUvGreenU, 60, kUvGreenU, kUvCentreV, white);
+    if (curDeg > 0) {
+        hud_ring(h, kUvGreenU, 180, 180 + (curDeg < 270 ? curDeg : 270), white);
+        if (curDeg > 270 && bar > 0) {
+            float len = (curDeg - 270) * kUnitsPerDeg;
+            if (len > bar) len = bar;
+            hud_sprite(h, -len, kRingR, 0, 0, kUvGreenU, 60, kUvGreenU, kUvCentreV, white);
+        }
     }
 
-    // --- MP: sits in the ring's open quadrant, just above the HP bar ---
+    // --- MP: where KH2's layout puts its tag, in the ring's open quarter ---
     const float mpY = 31, mpRight = -42, mpLen = 100;
     float mp = st.mp < 0 ? 0 : (st.mp > 1 ? 1 : st.mp);
     hud_sprite(h, mpRight - mpLen - 1, mpY - 5, mpRight + 1, mpY + 5, 183, 49, 185, 59, mpWell);
@@ -839,10 +888,12 @@ void draw_status_kh2() {
     }
     hud_sprite(h, -40, mpY - 5, -16, mpY + 5, 157, 37, 181, 47, st.mpCharging ? mpTagCh : mpTag);
 
+    // --- portrait: KH2's own, placed by its own layout data, over the gauge ---
     g_out = &g_faceVerts;
     if (g_face) {
-        const float r = 28.5f * h.unit;
-        quad(h.cx - r, h.cy - r, 2 * r, 2 * r, white, white, 0, 0, 0, 1, 1);
+        if (hp <= 0) face_sprite(h, -35, -51, 36, 44, 143, 0, 214, 95);        // down
+        else if (low) face_sprite(h, -34, -50, 35, 45, 72, 0, 141, 95);        // hurt
+        else face_sprite(h, -33, -50, 31, 45, 3, 0, 67, 95);
     }
     g_out = &g_verts;
 }
@@ -863,6 +914,8 @@ constexpr int kSlot = 11;                    // plain slot
 constexpr int kSlotField = 9, kSlotBattle = 22;        // selected slot, glowing
 constexpr int kBottom = 6;                   // cap under the last slot
 constexpr int kCursor = 20;
+constexpr int kIconRing = 45;                // gold ring behind the selected slot's icon
+constexpr float kSelectedShift = 14;         // the selected slot sits this far right
 constexpr int kIcon[4] = {37, 41, 39, 44};   // keyblade, hat, potion, charm
 constexpr int kSubHeader[4] = {-1, 60, 51, 73};      // MAGIC, ITEMS, SUMMONS
 constexpr int kSubSlot = 62;                 // wide slot for the lists
@@ -870,8 +923,76 @@ constexpr int kSubSlotSel[4] = {-1, 61, 48, 74};
 constexpr float kRowPitch = 22;
 }
 
+// ---- KH2's system font ----
+//
+// The sheet is a grid, 28 glyphs to a row, each cell 18x24 KH2 units (twice
+// that in the remastered sheet). Glyphs are stored grey and doubled when
+// drawn, like every colour in KH2's 2D data.
+constexpr int kFontCols = 28;
+constexpr float kFontCellW = 18, kFontCellH = 24;
+
+// Where a character sits in the grid, or -1 if the font has none.
+int kfont_glyph(char c) {
+    if (c >= '0' && c <= '9') return 1 + (c - '0');
+    if (c >= 'A' && c <= 'N') return 14 + (c - 'A');
+    if (c >= 'O' && c <= 'Z') return 28 + (c - 'O');
+    if (c >= 'a' && c <= 'r') return 4 * kFontCols + 10 + (c - 'a');
+    if (c >= 's' && c <= 'z') return 5 * kFontCols + (c - 's');
+    switch (c) {
+        case '+': return 11;
+        case '-': return 12;
+        case '!': return 40;
+        case '?': return 41;
+        case '%': return 42;
+        case '/': return 43;
+        case '.': return 47;
+        case ',': return 48;
+        case ':': return 50;
+        case '\'': return 55;
+        default: return -1;
+    }
+}
+
+// Text in KH2's font. x, y are the top left in pixels, unit the size of one
+// KH2 unit and scale how much smaller than the font's natural size to draw.
+float kfont_text(float x, float y, float unit, float scale, const char* s, const float col[4]) {
+    const float k = unit * scale;
+    const float c2[4] = {col[0] * 2, col[1] * 2, col[2] * 2, col[3]};
+    for (; *s; ++s) {
+        int g = kfont_glyph(*s);
+        if (g < 0 || g >= g_kfontCount) {
+            x += 6 * k;   // space, and anything the font lacks
+            continue;
+        }
+        float u0 = (g % kFontCols) * kFontCellW * 2 / 1024.0f, v0 = (g / kFontCols) * kFontCellH * 2 / 512.0f;
+        float u1 = u0 + kFontCellW * 2 / 1024.0f, v1 = v0 + kFontCellH * 2 / 512.0f;
+        float x1 = x + kFontCellW * k, y1 = y + kFontCellH * k;
+        vert(x, y, u0, v0, c2);
+        vert(x1, y, u1, v0, c2);
+        vert(x, y1, u0, v1, c2);
+        vert(x1, y, u1, v0, c2);
+        vert(x1, y1, u1, v1, c2);
+        vert(x, y1, u0, v1, c2);
+        x += g_kfontWidth[g] * k;
+    }
+    return x;
+}
+
 // White text with a dark edge, sized in KH2 units.
 void menu_text(float x, float y, float px, const char* s, const float col[4]) {
+    if (g_kfont) {
+        // px is the height asked for; the font's cell is 24 units tall
+        const float unit = kh2_unit();
+        const float scale = px / unit / 15.5f;
+        const float shadow[4] = {0.02f, 0.02f, 0.03f, 0.85f};
+        std::vector<Vertex>* was = g_out;
+        g_out = &g_kfontVerts;
+        const float top = y - 4 * unit * scale;   // glyphs sit a little down in their cell
+        kfont_text(x + unit, top + unit, unit, scale, s, shadow);
+        kfont_text(x, top, unit, scale, s, col);
+        g_out = was;
+        return;
+    }
     const float edge[4] = {0.05f, 0.04f, 0.03f, 0.9f};
     const float o = px * 0.07f;
     text(x - o, y, px, s, edge);
@@ -884,12 +1005,12 @@ void menu_text(float x, float y, float px, const char* s, const float col[4]) {
 void draw_menu_kh2() {
     static const char* kItems[4] = {"Attack", "Magic", "Items", "Summon"};
     const OverlayState st = g_state;
-    const float u = g_h / 448.0f;
-    const float ox = 27 * u;
-    const float oy = g_h - (3 * cmd::kRowPitch + 15 + 24) * u;   // bottom slot sits a little off the edge
+    const float u = kh2_unit();
+    const float ox = 37 * u;                                     // measured off KH2 screenshots
+    const float oy = g_h - (3 * cmd::kRowPitch + 15 + 18) * u;
     const int f = static_cast<int>(g_frameNo);
     const float white[4] = {1, 1, 1, 1};
-    const float dim[4] = {0.93f, 0.90f, 0.82f, 1};
+    const float dim[4] = {0.72f, 0.72f, 0.74f, 1};
 
     g_out = &g_cmdVerts;
     if (!st.subOpen) {
@@ -897,14 +1018,20 @@ void draw_menu_kh2() {
         seq_draw(g_cmdSeq, st.battle ? cmd::kHeaderBattle : cmd::kHeaderField, f % cmd::kHeaderFrames, ox,
                  oy - cmd::kRowPitch * u, u);
         seq_draw(g_cmdSeq, cmd::kBottom, f, ox, oy, u);
-        for (int i = 0; i < 4; ++i) seq_draw(g_cmdSeq, cmd::kSlot, f, ox, oy + i * cmd::kRowPitch * u, u);
-        float sy = oy + st.selected * cmd::kRowPitch * u;
-        seq_draw(g_cmdSeq, st.battle ? cmd::kSlotBattle : cmd::kSlotField, f, ox, sy, u);
-        for (int i = 0; i < 4; ++i) seq_draw(g_cmdSeq, cmd::kIcon[i], f, ox, oy + i * cmd::kRowPitch * u, u);
-        seq_draw(g_cmdSeq, cmd::kCursor, f, ox, sy, u);
-        g_out = &g_verts;
         for (int i = 0; i < 4; ++i)
-            menu_text(ox + 4 * u, oy + (i * cmd::kRowPitch - 7.5f) * u, 14 * u, kItems[i], i == st.selected ? white : dim);
+            if (i != st.selected) seq_draw(g_cmdSeq, cmd::kSlot, f, ox, oy + i * cmd::kRowPitch * u, u);
+        // the selected slot is pushed right and is the only one showing its icon
+        const float sx = ox + cmd::kSelectedShift * u;
+        const float sy = oy + st.selected * cmd::kRowPitch * u;
+        seq_draw(g_cmdSeq, st.battle ? cmd::kSlotBattle : cmd::kSlotField, f, sx, sy, u);
+        seq_draw(g_cmdSeq, cmd::kIconRing, f, sx, sy, u);
+        seq_draw(g_cmdSeq, cmd::kIcon[st.selected], f, sx, sy, u);
+        seq_draw(g_cmdSeq, cmd::kCursor, f, sx, sy, u);
+        g_out = &g_verts;
+        for (int i = 0; i < 4; ++i) {
+            bool sel = i == st.selected;
+            menu_text((sel ? sx : ox) + 5 * u, oy + (i * cmd::kRowPitch - 6.5f) * u, 12 * u, kItems[i], sel ? white : dim);
+        }
         return;
     }
 
@@ -923,24 +1050,23 @@ void draw_menu_kh2() {
         seq_draw(g_cmdSeq, cmd::kCursor, f, ox - 8 * u, oy + (st.subSelected - first) * cmd::kRowPitch * u, u);
     g_out = &g_verts;
     if (st.subCount == 0) {
-        menu_text(ox - 4 * u, oy - 7.5f * u, 14 * u, "Nothing", dim);
+        menu_text(ox - 4 * u, oy - 6.5f * u, 12 * u, "Nothing", dim);
         return;
     }
     for (int i = 0; i < shown; ++i) {
         const char* label = st.subNames[first + i] ? st.subNames[first + i] : "?";
-        menu_text(ox - 4 * u, oy + (i * cmd::kRowPitch - 7.5f) * u, 14 * u, label,
+        menu_text(ox - 4 * u, oy + (i * cmd::kRowPitch - 6.5f) * u, 12 * u, label,
                   first + i == st.subSelected ? white : dim);
     }
 }
 
 void draw_menu() {
-    if (!g_state.battle) return;   // outside battle only the status gauges show
     if (g_cmd) draw_menu_kh2();
     else draw_menu_plain();
 }
 
 void bind_and_draw(ID3D11RenderTargetView* rtv) {
-    D3D11_VIEWPORT vp{0, 0, g_w, g_h, 0, 1};
+    D3D11_VIEWPORT vp{0, 0, g_bw, g_bh, 0, 1};
     const FLOAT factor[4] = {0, 0, 0, 0};
     UINT stride = sizeof(Vertex), offset = 0;
     g_ctx->OMSetRenderTargets(1, &rtv, nullptr);
@@ -958,7 +1084,8 @@ void bind_and_draw(ID3D11RenderTargetView* rtv) {
     // same order the vertex buffer was filled in
     UINT at = 0;
     struct Layer { std::vector<Vertex>* verts; ID3D11ShaderResourceView* tex; };
-    const Layer layers[4] = {{&g_cmdVerts, g_cmd}, {&g_gaugeVerts, g_kh2}, {&g_faceVerts, g_face}, {&g_verts, g_font}};
+    const Layer layers[5] = {{&g_cmdVerts, g_cmd}, {&g_gaugeVerts, g_kh2}, {&g_faceVerts, g_face},
+                             {&g_kfontVerts, g_kfont}, {&g_verts, g_font}};
     for (const Layer& l : layers) {
         UINT n = static_cast<UINT>(l.verts->size());
         if (n && l.tex) {
@@ -970,9 +1097,20 @@ void bind_and_draw(ID3D11RenderTargetView* rtv) {
 }
 
 bool fill_vertices(UINT width, UINT height) {
-    g_w = static_cast<float>(width);
-    g_h = static_cast<float>(height);
+    g_bw = static_cast<float>(width);
+    g_bh = static_cast<float>(height);
+    const float aspect = 16.0f / 9.0f;
+    if (g_bw / g_bh < aspect) {          // taller than 16:9: bars top and bottom
+        g_w = g_bw;
+        g_h = g_bw / aspect;
+    } else {                             // wider: bars left and right
+        g_h = g_bh;
+        g_w = g_bh * aspect;
+    }
+    g_ox = (g_bw - g_w) / 2;
+    g_oy = (g_bh - g_h) / 2;
     g_cmdVerts.clear();
+    g_kfontVerts.clear();
     g_gaugeVerts.clear();
     g_faceVerts.clear();
     g_verts.clear();
@@ -980,11 +1118,12 @@ bool fill_vertices(UINT width, UINT height) {
     ++g_frameNo;
     draw_menu();
     draw_status();
-    if (g_cmdVerts.empty() && g_gaugeVerts.empty() && g_faceVerts.empty() && g_verts.empty()) return false;
+    if (g_cmdVerts.empty() && g_gaugeVerts.empty() && g_faceVerts.empty() && g_verts.empty() && g_kfontVerts.empty())
+        return false;
     D3D11_MAPPED_SUBRESOURCE map;
     if (FAILED(g_ctx->Map(g_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return false;
     Vertex* dst = static_cast<Vertex*>(map.pData);
-    for (std::vector<Vertex>* v : {&g_cmdVerts, &g_gaugeVerts, &g_faceVerts, &g_verts}) {
+    for (std::vector<Vertex>* v : {&g_cmdVerts, &g_gaugeVerts, &g_faceVerts, &g_kfontVerts, &g_verts}) {
         memcpy(dst, v->data(), v->size() * sizeof(Vertex));
         dst += v->size();
     }

@@ -7,28 +7,31 @@ Very much a work in progress.
 
 ## What works
 
-- KH2 command menu in battle, drawn from KH2's own sheet and layout data
-  (Twilight Town's for now): Attack, Magic, Items, Summon. Up/down (D-pad or
-  arrow keys) move the cursor, the game's confirm button acts, B / Backspace /
-  left backs out of a list
-- KH2 status gauges bottom right, also from KH2's art: HP ring and bar, MP bar,
-  with Sora's portrait from Re:CoM. Shown in battle and while walking around
+- KH2 command menu, drawn from KH2's own sheet, layout data and font
+  (Twilight Town's skin for now): Attack, Magic, Items, Summon. Up/down (D-pad
+  or arrow keys) move the cursor, the game's confirm button acts, B / Backspace
+  / left backs out of a list. Shown outside battle too, where it is only for looks
+- KH2 status gauges bottom right: KH2's portrait of Sora in his KH1 clothes
+  (normal, hurt, down), the HP ring growing clockwise with max HP and spilling
+  into a bar once it is full, and the MP bar
 - Attack always swings a Kingdom Key 9 and never uses a card up
 - Magic, Items and Summon open a list built from what is in the deck. Nothing
   leaves the deck when used
 - MP: spells cost MP, Cure takes all of it, and at zero it recharges with magic
   locked until it is full
 - No card breaks: the two sides' cards never interact
-- The game's own HUD is hidden: deck, played cards on both sides, portrait.
-  F6 brings it back
+- The game's own HUD is hidden: deck, played cards on both sides, portrait,
+  map card panel. F6 brings most of it back
 - The deck can no longer be scrolled or switched by the player
 
 ## Not done yet
 
 - Enemies still play cards (you just can't see them)
-- Enemy cards and friend cards are unreachable (they live on the deck's second row)
-- Menu text is a system font, not KH2's
+- Party members: F5 / F7 call Donald / Goofy without a friend card as a test,
+  nothing automatic yet
+- Enemy cards are unreachable (they live on the deck's second row)
 - Only the Twilight Town menu skin; no per-world skins yet
+- Menu has no opening animation and the header's smoke is left out
 - Items and summons are free
 
 ## Art

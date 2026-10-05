@@ -3,14 +3,17 @@ files, so no game art has to live in the repo.
 
     python make_assets.py <extracted recom folder> <output folder> [<extracted kh2 folder>]
 
-Writes face.rgba: 256x256 RGBA, Sora's portrait cut out of the player gauge
-texture with a round mask.
+Writes face.rgba: 256x256 RGBA, Sora's head cut out of the player gauge
+texture, hair included.
 
 With a KH2 folder it also writes, from field2d/us:
 
     kh2_gauge.rgba     the gauge sheet (tt0field.2dd), for the HP and MP gauges
+    kh2_face.rgba      KH2's HUD portrait of Sora in his KH1 clothes
     kh2_command.rgba   the command menu sheet (tt0command.2dd)
     kh2_command.seq    that menu's layout and animation data, flattened
+    kh2_font.rgba      the system font sheet (msg/us/fontimage.bar)
+    kh2_font.bin       its advance widths (msg/us/fontinfo.bar)
 
 The .seq needs OpenKH's command line tools to unpack the .2dd: pass the folder
 holding OpenKh.Command.Bar.exe and OpenKh.Command.Layout.exe as a fourth
@@ -22,11 +25,34 @@ import subprocess
 import sys
 import tempfile
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageFilter
 
 SIZE = 256
-# portrait disc inside pl_gauge_tm2.dds (1024x512)
+# portrait disc inside pl_gauge_tm2.dds (1024x512), and how much around it to take
 CX, CY, R = 233, 204, 106
+SPAN = 150
+
+
+def cut_face(tex):
+    """Sora's head out of the player gauge texture, hair and all. KH2 draws the
+    portrait over the gauge with the hair spilling past the ring, so the disc
+    it sits in here has to go: inside the disc everything but its black
+    background is kept, outside it only hair and skin coloured pixels are (the
+    rest out there is the green gauge and the white rim)."""
+    import numpy as np
+    px = np.asarray(tex.convert("RGBA")).astype(np.float32)
+    crop = px[CY - SPAN:CY + SPAN, CX - SPAN:CX + SPAN]
+    yy, xx = np.mgrid[-SPAN:SPAN, -SPAN:SPAN]
+    inside = np.sqrt(xx ** 2 + yy ** 2) <= R - 1
+    r, g, b, a = crop[..., 0], crop[..., 1], crop[..., 2], crop[..., 3]
+    warm = (r > g * 1.12) & (r > b * 1.25) & (r > 70) & (a > 128)
+    dark = (r < 40) & (g < 40) & (b < 40)
+    alpha = np.where(inside, np.where(dark, 0, 255), np.where(warm, 255, 0)).astype(np.uint8)
+    face = Image.fromarray(np.dstack([r, g, b, alpha]).astype(np.uint8), "RGBA")
+    # soften the cut edge a little, then down to the size the overlay loads
+    r_, g_, b_, a_ = face.split()
+    face = Image.merge("RGBA", (r_, g_, b_, a_.filter(ImageFilter.GaussianBlur(0.8))))
+    return face.resize((SIZE, SIZE), Image.LANCZOS)
 
 
 def colour(c):
@@ -86,15 +112,8 @@ def write_seq(yml_path, out_path):
 
 def main():
     src, out = sys.argv[1], sys.argv[2]
-    tex = Image.open(os.path.join(src, "remastered", "CARD", "9004", "CA9004.RTM", "pl_gauge_tm2.dds")).convert("RGBA")
-    face = tex.crop((CX - R, CY - R, CX + R, CY + R)).resize((SIZE, SIZE), Image.LANCZOS)
-
-    # round mask, supersampled so the edge is smooth
-    big = Image.new("L", (SIZE * 4, SIZE * 4), 0)
-    ImageDraw.Draw(big).ellipse((4, 4, SIZE * 4 - 5, SIZE * 4 - 5), fill=255)
-    mask = big.resize((SIZE, SIZE), Image.LANCZOS)
-    r, g, b, a = face.split()
-    face = Image.merge("RGBA", (r, g, b, Image.composite(a, Image.new("L", a.size, 0), mask)))
+    tex = Image.open(os.path.join(src, "remastered", "CARD", "9004", "CA9004.RTM", "pl_gauge_tm2.dds"))
+    face = cut_face(tex)
 
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "face.rgba"), "wb") as f:
@@ -109,6 +128,22 @@ def main():
         with open(os.path.join(out, "kh2_gauge.rgba"), "wb") as f:
             f.write(sheet.tobytes())
         print("wrote", os.path.join(out, "kh2_gauge.rgba"))
+
+        # KH2's HUD portrait of Sora in his KH1 clothes (the one he wears at the
+        # start of KH2, and Limit Form's): normal, hurt and down, side by side
+        faces = Image.open(os.path.join(sys.argv[3], "remastered", "obj", "P_EX100_KH1F.a.us", "-9.dds")).convert("RGBA")
+        assert faces.size == (1024, 512), faces.size
+        with open(os.path.join(out, "kh2_face.rgba"), "wb") as f:
+            f.write(faces.tobytes())
+        print("wrote", os.path.join(out, "kh2_face.rgba"))
+
+        # KH2's system font: a grid of 28 glyphs a row, plus one advance width a glyph
+        font = Image.open(os.path.join(sys.argv[3], "remastered", "msg", "us", "fontimage.bar",
+                                       "US_fontimage_bar0.png")).convert("RGBA")
+        assert font.size == (1024, 512), font.size
+        with open(os.path.join(out, "kh2_font.rgba"), "wb") as f:
+            f.write(font.tobytes())
+        print("wrote", os.path.join(out, "kh2_font.rgba"))
 
         us = os.path.join(sys.argv[3], "remastered", "field2d", "us")
         sheet = Image.open(os.path.join(us, "tt0command.2dd", "US_tt0command_2dd0.png")).convert("RGBA")
@@ -127,6 +162,15 @@ def main():
             subprocess.run([os.path.join(tools, "OpenKh.Command.Layout.exe"), "unsequence",
                             os.path.join(tmp, "comw.sqd"), "-o", yml], check=True, stdout=subprocess.DEVNULL)
             write_seq(yml, os.path.join(out, "kh2_command.seq"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            info = os.path.join(sys.argv[3], "original", "msg", "us", "fontinfo.bar")
+            subprocess.run([os.path.join(tools, "OpenKh.Command.Bar.exe"), "unpack", info, "-o", tmp],
+                           check=True, stdout=subprocess.DEVNULL)
+            widths = open(os.path.join(tmp, "sys.list"), "rb").read()
+            with open(os.path.join(out, "kh2_font.bin"), "wb") as f:
+                f.write(widths)
+            print("wrote", os.path.join(out, "kh2_font.bin"), len(widths), "glyphs")
 
 
 if __name__ == "__main__":
