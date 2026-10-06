@@ -192,8 +192,9 @@ struct SharedState {
     LONG subCount;
     LONG subSelected;
     char subNames[16][24];
+    char context[24];  // something in reach to act on, empty for nothing
 };
-constexpr char kSharedName[] = "Local\\recom_mods_v2";
+constexpr char kSharedName[] = "Local\\recom_mods_v3";
 
 // Whichever mod loads first makes the block.
 static volatile SharedState* shared_state() {
@@ -622,6 +623,11 @@ static void move_player_gauge(uintptr_t player) {
     if (!friends || at<uintptr_t>(friends) != g_base + rva::kVtFriendGauge) return;
     uintptr_t ctrls = at<uintptr_t>(friends + kFgCtrls);
     if (!ctrls) return;
+    // Left at that, they would show for a frame each time the game lays them
+    // out again, which it does going into a door's menu. It only does so while
+    // it counts at least one card to show, so tell it there are none.
+    constexpr uintptr_t kFgCount = 0x5C;
+    at<int32_t>(friends + kFgCount) = 0;
     for (int i = 0; i < 3; ++i) {
         uintptr_t c = ctrls + i * kCtrlSize;
         if (at<uintptr_t>(c) != g_base + rva::kVtSeqCtrl) break;
@@ -647,6 +653,27 @@ static bool game_menu_open() {
     return (flags & kBusy) != 0 || hudOff != 0;
 }
 
+// Outside battle: true while Sora is the player's to move. He is not during
+// a door's room synthesis screen, while a chest opens or in a scene, and the
+// command menu has no business on screen then. The game takes control away
+// for a moment in ordinary play too, so only a spell of it counts.
+static bool field_player_free(uintptr_t player) {
+    constexpr uintptr_t kPlControl = 0x230;   // bit 0: the player has control
+    constexpr uintptr_t kPlState = 0x40C;     // what he is doing
+    constexpr unsigned kGrace = 12;           // frames
+    static unsigned busy = 0;
+    static int32_t lastState = -1;
+    const int32_t state = at<int32_t>(player + kPlState);
+    const bool control = (at<uint32_t>(player + kPlControl) & 1) != 0;
+    if (state != lastState) logf("player state %d, control %d", state, control ? 1 : 0);
+    lastState = state;
+    // opening a chest, making a room at a door, picking a world, going through a door
+    if (state == 0x11 || state == 0x14 || state == 0x15 || state == 0x1D) return false;
+    if (control) busy = 0;
+    else if (busy < 1000) ++busy;
+    return busy < kGrace;
+}
+
 // Where Sora is and how he is doing. Returns his deck, or 0 outside battle.
 static uintptr_t publish_status() {
     uintptr_t deck = player_deck();
@@ -664,6 +691,7 @@ static uintptr_t publish_status() {
         hud.visible = fieldPlayer && save && at<uint8_t>(g_base + rva::kWorld) != 0xFF &&
                       at<uint8_t>(g_base + rva::kLoading) != 0xFF && !game_menu_open();
         hud.context = nullptr;
+        if (hud.visible && !field_player_free(fieldPlayer)) hud.visible = false;
         if (hud.visible) {
             hud.hp = at<int32_t>(save);
             hud.hpMax = at<int32_t>(save + 4);
@@ -700,6 +728,8 @@ static void frame() {
             char* to = const_cast<char*>(b->subNames[i]);
             strncpy_s(to, 24, name, _TRUNCATE);
         }
+        const char* context = overlay_state().visible ? overlay_state().context : nullptr;
+        strncpy_s(const_cast<char*>(b->context), 24, context ? context : "", _TRUNCATE);
     }
     if (!deck) {
         // every battle starts on Attack with nothing open
