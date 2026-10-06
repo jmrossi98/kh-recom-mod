@@ -6,10 +6,12 @@ HD 1.5+2.5 ReMIX only.
 
 Very much a work in progress.
 
-The game's own portrait and HP gauge are left alone. For KH2's gauge and
-portrait, and a menu skin for each world, there is a second mod that goes on
-top of this one or works by itself:
-[kh-recom-kh2-hud](https://github.com/jmrossi98/kh-recom-kh2-hud).
+The game's own portrait and HP gauge stay, moved to the bottom right. For
+KH2's gauge, portrait and command menu instead there is a second mod, which
+works with this one or by itself:
+[kh-recom-kh2-hud](https://github.com/jmrossi98/kh-recom-kh2-hud). Neither
+needs the other and neither holds the other's code; when both are running
+they find each other through a small block of shared memory.
 
 ## What works
 
@@ -27,8 +29,10 @@ top of this one or works by itself:
 - The game's own menu sounds: cursor, open, back, confirm, error
 - Donald and Goofy head the Summon list and are always there
 - Hidden while the game's start menu, pause screen or save menu is up
-- With the KH2 HUD mod installed the menu is KH2's instead, laid out from
-  KH2's own data and skinned for the world
+- The game's portrait and HP gauge sit bottom right instead of top left, and
+  the map card panel and the row of friend cards are out of the way
+- With the KH2 HUD mod running this mod draws no menu: it passes the menu's
+  state across and that mod draws it in KH2's style
 - Attack always swings a Kingdom Key 9 and never uses a card up
 - Magic, Items and Summon open a list built from what is in the deck. Nothing
   leaves the deck when used
@@ -64,8 +68,7 @@ back to plain shapes.
   loads the dll.
 - `src/combat.cpp` - native side, hooks the game's play-card call and the card
   battle update.
-- `src/overlay.cpp` - draws the command menu and MP over the game. Shared with
-  the KH2 HUD mod, which draws the rest of what is in it. The game presents
+- `src/overlay.cpp` - draws the command menu over the game. The game presents
   from a D3D12 swap chain, so this hooks Present and draws through D3D11On12.
 - `tools_dev/` - `make_assets.py` (see Art), two test programs that render the
   overlay to a BMP without the game (D3D11 and D3D12 swap chains, build with

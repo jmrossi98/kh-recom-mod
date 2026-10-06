@@ -36,6 +36,9 @@ constexpr uintptr_t kMapCardGate = 0x1E4818;  // and eax,8: hide test for the ma
 constexpr uintptr_t kFindTask    = 0x2AD350;  // void* (int id): the object behind a task id
 constexpr uintptr_t kSubField    = 0x87B0B0;  // -> CGameSubField; +0x5A0 flags for what is open over the game
 constexpr uintptr_t kHudOff      = 0x87B808;  // int, non-zero while the game keeps its own HUD off
+constexpr uintptr_t kVtPlayerGauge = 0x5A6638;  // Gauge::CPlayerGauge
+constexpr uintptr_t kVtFriendGauge = 0x5A6788;  // Gauge::CFriendGauge
+constexpr uintptr_t kVtSeqCtrl   = 0x607340;  // D2::C2DSeqCtrl, what draws a piece of HUD
 constexpr uintptr_t kPlaySe      = 0x2AA360;  // uint (uint id, int volume): a sound effect, -1 for full volume
 // vtables of what the field's lock-on marker can offer to act on
 constexpr uintptr_t kVtDoor      = 0x572478;
@@ -174,29 +177,39 @@ static bool g_mpCharging = false;
 static bool g_hideCards = true;
 
 // What the combat mod and the KH2 HUD mod tell each other, in a small named
-// block of shared memory the HUD mod creates. Each stamps its tick every frame
-// so the other knows it is there. MP belongs to the pair: the combat mod only
-// charges for magic while the HUD mod is up to show the bar.
-struct SharedHud {
+// block of shared memory. Neither needs the other; each stamps its tick every
+// frame so the other can tell it is there. When both are, the HUD mod draws
+// the command menu in KH2's style from what the combat mod puts here, and
+// magic costs MP, which the HUD mod shows.
+struct SharedState {
     ULONGLONG hudTick;
     ULONGLONG combatTick;
     float mp;          // 0..1
     LONG mpCharging;
+    // the command menu, written by the combat mod
+    LONG selected;     // row of the main menu
+    LONG subOpen;      // a list is open over it
+    LONG subCount;
+    LONG subSelected;
+    char subNames[16][24];
 };
-constexpr char kSharedName[] = "Local\\recom_kh2_hud";
+constexpr char kSharedName[] = "Local\\recom_mods_v2";
 
-static volatile SharedHud* shared_hud() {
-    static volatile SharedHud* block = nullptr;
-    static unsigned tries = 0;
-    if (!block && tries++ % 120 == 0) {
-        if (HANDLE h = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, kSharedName))
-            block = static_cast<SharedHud*>(MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(SharedHud)));
+// Whichever mod loads first makes the block.
+static volatile SharedState* shared_state() {
+    static volatile SharedState* block = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        if (HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedState),
+                                          kSharedName))
+            block = static_cast<SharedState*>(MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(SharedState)));
     }
     return block;
 }
 
 static bool kh2_hud_running() {
-    volatile SharedHud* b = shared_hud();
+    volatile SharedState* b = shared_state();
     return b && GetTickCount64() - b->hudTick < 500;
 }
 static bool g_hideKeyDown = false;
@@ -520,6 +533,16 @@ static void install_hooks() {
     const uint8_t gate_open[5]   = {0xB8, 0x00, 0x00, 0x00, 0x00};
     if (memcmp(gate, gate_expect, 5) == 0 && write_code(gate, gate_open, 5)) logf("play gate open");
     else logf("play gate: unexpected bytes, card hud will stay visible"), g_hideCards = false;
+
+    // Outside battle the game shows the current map card bottom right, where
+    // the portrait and HP gauge now go. The room map and this panel share one
+    // hide bit; make only the panel's test read it as set.  and eax,8 -> or eax,8
+    uint8_t* panel = reinterpret_cast<uint8_t*>(g_base + rva::kMapCardGate);
+    const uint8_t panel_expect[3] = {0x83, 0xE0, 0x08};
+    const uint8_t panel_hide[3]   = {0x83, 0xC8, 0x08};
+    if (memcmp(panel, panel_hide, 3) == 0) logf("map card panel already hidden");
+    else if (memcmp(panel, panel_expect, 3) == 0 && write_code(panel, panel_hide, 3)) logf("map card panel hidden");
+    else logf("map card panel: unexpected bytes, leaving it");
 }
 
 static void set_hud_flags(uint32_t bits) {
@@ -560,6 +583,53 @@ static const char* field_context(uintptr_t player) {
     }
 }
 
+// The game's portrait and HP gauge sit top left. With the command menu bottom
+// left they read better bottom right, where KH2 has them. Everything of the
+// gauge hangs off one controller whose position is set once from the layout
+// file and then left alone, so it only has to be written over each frame.
+// The screen is 512x384 with the origin in the middle; a wide picture adds
+// 85 either side, which the game takes off again at draw time.
+static void move_player_gauge(uintptr_t player) {
+    constexpr uintptr_t kPlGauge = 0x3E0;
+    constexpr uintptr_t kGgCtrl = 0x78, kGgWide = 0xA0, kGgMaxHp = 0xA8;
+    constexpr float kMargin = 16;    // what the game leaves round it top left
+    uintptr_t gauge = at<uintptr_t>(player + kPlGauge);
+    if (!gauge || at<uintptr_t>(gauge) != g_base + rva::kVtPlayerGauge) return;
+    uintptr_t ctrl = at<uintptr_t>(gauge + kGgCtrl);
+    if (!ctrl || at<uintptr_t>(ctrl) != g_base + rva::kVtSeqCtrl) return;
+
+    // The HP bar wraps the portrait and then runs right, further the more max
+    // HP there is. Keep its far end inside the picture.
+    const float wide = at<float>(gauge + kGgWide);
+    int maxHp = at<uint16_t>(gauge + kGgMaxHp);
+    if (maxHp > 560) maxHp = 560;
+    float reach = maxHp * 470.0f / 560 - 270 + 2;
+    if (reach < 44) reach = 44;
+    const float x = (256 + wide - kMargin - reach) + wide;
+    const float y = 192 - kMargin - 44;
+    at<float>(ctrl + 0xF0) = x;
+    at<float>(ctrl + 0xF4) = y;
+    at<float>(ctrl + 0x40) = x;
+    at<float>(ctrl + 0x44) = y;
+
+    // Outside battle the friend cards owned are lined up beside the portrait,
+    // top left. With the gauge gone from there they are left on their own, and
+    // Donald and Goofy are in the Summon list now anyway. Each card rides on
+    // its own controller, three in a row; push those off the picture. The game
+    // puts them back whenever the display changes state, hence every frame.
+    constexpr uintptr_t kGgFriends = 0x60, kFgCtrls = 0x78, kCtrlSize = 0x170;
+    uintptr_t friends = at<uintptr_t>(gauge + kGgFriends);
+    if (!friends || at<uintptr_t>(friends) != g_base + rva::kVtFriendGauge) return;
+    uintptr_t ctrls = at<uintptr_t>(friends + kFgCtrls);
+    if (!ctrls) return;
+    for (int i = 0; i < 3; ++i) {
+        uintptr_t c = ctrls + i * kCtrlSize;
+        if (at<uintptr_t>(c) != g_base + rva::kVtSeqCtrl) break;
+        at<float>(c + 0xF0) = at<float>(c + 0x40) = -4000;
+        at<float>(c + 0xF4) = at<float>(c + 0x44) = -4000;
+    }
+}
+
 // True while something of the game's own is up over play: the start menu, the
 // pause screen, the save menu. The game asks the same question before it lets
 // a menu open, with the same mask.
@@ -581,8 +651,9 @@ static bool game_menu_open() {
 static uintptr_t publish_status() {
     uintptr_t deck = player_deck();
     OverlayState& hud = overlay_state();
-    hud.menu = true;
+    // with the KH2 HUD mod up the menu is its to draw, in KH2's style
     hud.kh2Hud = kh2_hud_running();
+    hud.menu = !hud.kh2Hud;
     hud.world = at<uint8_t>(g_base + rva::kWorld);
     if (!deck) {
         // Walking around: HP from the save block, since the battle object is
@@ -597,6 +668,7 @@ static uintptr_t publish_status() {
             hud.hp = at<int32_t>(save);
             hud.hpMax = at<int32_t>(save + 4);
             hud.context = field_context(fieldPlayer);
+            if (!hud.kh2Hud) move_player_gauge(fieldPlayer);
             static const char* lastContext = nullptr;
             if (hud.context != lastContext) logf("context: %s", hud.context ? hud.context : "none");
             lastContext = hud.context;
@@ -609,15 +681,25 @@ static uintptr_t publish_status() {
     uintptr_t player = at<uintptr_t>(g_base + rva::kPlayerPtr);
     hud.hp = at<int32_t>(player + kPlHp);
     hud.hpMax = at<int32_t>(player + kPlHpMax);
+    if (!hud.kh2Hud) move_player_gauge(player);
     return deck;
 }
 
 static void frame() {
     uintptr_t deck = publish_status();
-    if (volatile SharedHud* b = shared_hud()) {
+    if (volatile SharedState* b = shared_state()) {
         b->combatTick = GetTickCount64();
         b->mp = g_mp / kMpMax;
         b->mpCharging = g_mpCharging;
+        b->selected = g_menu.main;
+        b->subOpen = g_menu.sub;
+        b->subCount = g_menu.subCount;
+        b->subSelected = g_menu.subSel;
+        for (int i = 0; i < g_menu.subCount && i < 16; ++i) {
+            const char* name = card_name(g_menu.subCards[i].id);
+            char* to = const_cast<char*>(b->subNames[i]);
+            strncpy_s(to, 24, name, _TRUNCATE);
+        }
     }
     if (!deck) {
         // every battle starts on Attack with nothing open
